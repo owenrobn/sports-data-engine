@@ -77,8 +77,9 @@ async def normalize_polymarket(items,sport):
                 except: price=None
                 await db("POST","prediction_market_snapshots",{"event_id":eid,"venue":"polymarket","market_id":mid or pid,"outcome":str(outcome),"price":price,"volume":m.get("volumeNum") or m.get("volume"),"liquidity":m.get("liquidityNum") or m.get("liquidity"),"observed_at":now(),"payload":{"question":m.get("question"),"slug":m.get("slug")}})
                 snap_count+=1
-        hist,books=await backfill_polymarket_event(item,eid)
+        hist,books,trades=await backfill_polymarket_event(item,eid)
         snap_count+=hist
+        emit("backfill","Polymarket history archived",event_id=eid,price_points=hist,books=books,trades=trades)
     return event_count,snap_count
 
 async def polymarket_price_history(token_id,event_id,market_id,start_ts=None,end_ts=None):
@@ -110,10 +111,33 @@ async def polymarket_book_snapshot(token_id,event_id,market_id):
     await db("POST","prediction_market_books",{"event_id":event_id,"venue":"polymarket","market_id":market_id,"token_id":token_id,"best_bid":bb,"best_ask":ba,"spread":(ba-bb if ba is not None and bb is not None else None),"bids":bids,"asks":asks,"observed_at":now()})
     return 1
 
+async def polymarket_trades(condition_id,event_id):
+    total=0; offset=0
+    while offset<=10000:
+        async with httpx.AsyncClient(timeout=45) as client:
+            response=await client.get("https://data-api.polymarket.com/trades",params={"market":condition_id,"limit":1000,"offset":offset,"takerOnly":"false"})
+            response.raise_for_status(); trades=response.json()
+        if not trades: break
+        rows=[]
+        for t in trades:
+            ts=t.get("timestamp")
+            if ts is None: continue
+            price=t.get("price"); size=t.get("size")
+            rows.append({"event_id":event_id,"venue":"polymarket","market_id":condition_id,"token_id":str(t.get("asset") or ""),"trade_id":t.get("transactionHash"),"trader":t.get("proxyWallet"),"side":t.get("side"),"outcome":t.get("outcome"),"price":price,"size":size,"amount":(float(price)*float(size) if price is not None and size is not None else None),"executed_at":datetime.fromtimestamp(int(ts),timezone.utc).isoformat(),"observed_at":now(),"payload":{"title":t.get("title"),"slug":t.get("slug"),"eventSlug":t.get("eventSlug"),"name":t.get("name"),"pseudonym":t.get("pseudonym")}})
+        for i in range(0,len(rows),250): await db("POST","prediction_market_trades",rows[i:i+250])
+        total+=len(rows)
+        if len(trades)<1000: break
+        offset+=1000
+    return total
+
 async def backfill_polymarket_event(item,event_id):
-    total=0; books=0
+    total=0; books=0; trades=0
     for market in item.get("markets") or []:
         market_id=str(market.get("id") or market.get("conditionId") or item.get("id"))
+        condition_id=str(market.get("conditionId") or "")
+        if condition_id:
+            try: trades+=await polymarket_trades(condition_id,event_id)
+            except Exception as e: emit("warning","Trade history unavailable",market_id=market_id,error=str(e))
         tokens=market.get("clobTokenIds") or []
         if isinstance(tokens,str):
             try: tokens=json.loads(tokens)
@@ -123,7 +147,7 @@ async def backfill_polymarket_event(item,event_id):
             except Exception as e: emit("warning","CLOB history unavailable",market_id=market_id,error=str(e))
             try: books+=await polymarket_book_snapshot(str(token),event_id,market_id)
             except Exception as e: emit("warning","CLOB book unavailable",market_id=market_id,error=str(e))
-    return total,books
+    return total,books,trades
 
 async def bootstrap_collectors():
     await asyncio.sleep(3)

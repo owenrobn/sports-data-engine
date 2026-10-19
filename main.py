@@ -1,70 +1,102 @@
-import asyncio, json, os, time, uuid
-from collections import deque
+import asyncio, json, os, uuid
 from datetime import datetime, timezone
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 import httpx
 
-app=FastAPI(title="Sports Data Engine",version="0.3.0")
-events=deque(maxlen=1000)
-jobs={}
+app=FastAPI(title="Sports Data Engine",version="0.4.0")
+SUPABASE_URL=os.getenv("SUPABASE_URL","").rstrip("/")
+SUPABASE_KEY=os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+mem_events=[]; mem_jobs={}
 
 def now(): return datetime.now(timezone.utc).isoformat()
+def headers():
+    return {"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}","Content-Type":"application/json","Prefer":"return=representation"}
+async def db(method,table,payload=None,query=""):
+    if not (SUPABASE_URL and SUPABASE_KEY): return None
+    async with httpx.AsyncClient(timeout=25) as c:
+        r=await c.request(method,f"{SUPABASE_URL}/rest/v1/{table}{query}",headers=headers(),json=payload)
+        r.raise_for_status()
+        return r.json() if r.content else None
+async def job_patch(jid,**fields):
+    fields["updated_at"]=now(); mem_jobs.setdefault(jid,{}).update(fields)
+    try: await db("PATCH","ingestion_jobs",fields,f"?id=eq.{jid}")
+    except Exception as e: emit("db_warning","Job persistence failed",error=str(e))
 def emit(kind,message,**data):
-    events.appendleft({"ts":now(),"kind":kind,"message":message,**data})
+    item={"ts":now(),"kind":kind,"message":message,**data}; mem_events.insert(0,item); del mem_events[500:]
 
 @app.on_event("startup")
-async def startup(): emit("system","SDE v0.3 online")
-
+async def startup(): emit("system","SDE v0.4 online",persistent=bool(SUPABASE_KEY))
+@app.get("/")
+async def root(): return RedirectResponse("/dashboard")
 @app.get("/health")
-async def health(): return {"ok":True,"service":"sports-data-engine","version":"0.3.0","time":now()}
-
+async def health(): return {"ok":True,"service":"sports-data-engine","version":"0.4.0","database":bool(SUPABASE_KEY),"time":now()}
+@app.get("/providers")
+async def providers(): return {"providers":{"sofascore":"active","polymarket":"active","statsbomb":"backfill","football-data":"backfill","thesportsdb":"fallback"},"sports":["football","tennis"]}
 @app.get("/status")
 async def status():
-    return {"ok":True,"version":"0.3.0","jobs":len(jobs),"events_buffered":len(events),"supabase_configured":bool(os.getenv("SUPABASE_URL"))}
-
-@app.get("/providers")
-async def providers():
-    return {"providers":["sofascore","statsbomb","thesportsdb","football-data","polymarket"],"sports":["football","tennis"]}
-
+    counts={}
+    if SUPABASE_KEY:
+        for table in ("events","event_snapshots","odds_snapshots","prediction_market_snapshots","raw_ingestions"):
+            try:
+                async with httpx.AsyncClient(timeout=15) as c:
+                    h=headers(); h["Prefer"]="count=exact"; r=await c.get(f"{SUPABASE_URL}/rest/v1/{table}?select=id&limit=1",headers=h); counts[table]=r.headers.get("content-range","0/0").split("/")[-1]
+            except: counts[table]="?"
+    return {"ok":True,"version":"0.4.0","persistent":bool(SUPABASE_KEY),"counts":counts,"events_buffered":len(mem_events)}
 @app.get("/progress")
-async def progress(): return list(events)[:100]
-
-@app.get("/jobs")
-async def list_jobs(): return sorted(jobs.values(),key=lambda x:x["created_at"],reverse=True)
-
+async def progress(): return mem_events[:100]
 @app.get("/progress/stream")
 async def stream():
     async def gen():
         seen=None
         while True:
-            if events and events[0]["ts"]!=seen:
-                seen=events[0]["ts"]
-                yield "data: "+json.dumps(events[0])+"\n\n"
+            if mem_events and mem_events[0]["ts"]!=seen:
+                seen=mem_events[0]["ts"]; yield "data: "+json.dumps(mem_events[0])+"\n\n"
             else: yield ": keepalive\n\n"
             await asyncio.sleep(2)
     return StreamingResponse(gen(),media_type="text/event-stream")
+@app.get("/jobs")
+async def jobs():
+    if SUPABASE_KEY:
+        try: return await db("GET","ingestion_jobs",query="?select=*&order=created_at.desc&limit=100")
+        except: pass
+    return sorted(mem_jobs.values(),key=lambda x:x.get("created_at",""),reverse=True)
+
+async def create_job(provider,sport,date):
+    jid=str(uuid.uuid4()); row={"id":jid,"job_type":"discover","provider":provider,"sport":sport,"status":"queued","progress":0,"params":{"date":date},"created_at":now(),"updated_at":now()}
+    mem_jobs[jid]=row
+    if SUPABASE_KEY: await db("POST","ingestion_jobs",row)
+    return jid
+
+async def raw_ingest(provider,resource_id,payload):
+    row={"provider":provider,"resource_type":"discovery","provider_resource_id":resource_id,"observed_at":now(),"retrieved_at":now(),"metadata":{"payload":payload}}
+    if SUPABASE_KEY: await db("POST","raw_ingestions",row)
 
 @app.post("/jobs/discover/{provider}/{sport}/{date}")
 async def discover(provider:str,sport:str,date:str):
-    jid=str(uuid.uuid4()); job={"id":jid,"type":"discover","provider":provider,"sport":sport,"date":date,"status":"queued","progress":0,"created_at":now()}; jobs[jid]=job
-    asyncio.create_task(run_discovery(jid)); return {"job_id":jid}
+    if provider not in ("sofascore","polymarket"): raise HTTPException(400,"cloud discovery currently supports sofascore or polymarket")
+    jid=await create_job(provider,sport,date); asyncio.create_task(run_discovery(jid,provider,sport,date)); return {"job_id":jid}
 
-async def run_discovery(jid):
-    j=jobs[jid]; j["status"]="running"; j["progress"]=10; emit("job","Discovery started",job_id=jid,provider=j["provider"],sport=j["sport"])
+async def run_discovery(jid,provider,sport,date):
+    await job_patch(jid,status="running",progress=10,started_at=now()); emit("job","Discovery started",job_id=jid,provider=provider,sport=sport)
     try:
-        if j["provider"]=="sofascore":
-            url=f"https://www.sofascore.com/api/v1/sport/{j['sport']}/scheduled-events/{j['date']}"
-        elif j["provider"]=="polymarket":
-            url="https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100"
-        else: raise ValueError("provider discovery adapter not enabled on cloud yet")
-        async with httpx.AsyncClient(timeout=25) as c:
-            r=await c.get(url); r.raise_for_status(); data=r.json()
-        j["status"]="completed"; j["progress"]=100; j["result_summary"]={"items":len(data.get("events",data)) if isinstance(data,(dict,list)) else None}; emit("job","Discovery completed",job_id=jid)
+        if provider=="sofascore":
+            url=f"https://www.sofascore.com/api/v1/sport/{sport}/scheduled-events/{date}"
+            async with httpx.AsyncClient(timeout=30,headers={"User-Agent":"SDE/0.4"}) as c:
+                r=await c.get(url); r.raise_for_status(); payload=r.json()
+            items=payload.get("events",[])
+        else:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r=await c.get("https://gamma-api.polymarket.com/events",params={"active":"true","closed":"false","limit":100}); r.raise_for_status(); all_items=r.json()
+            needle=sport.lower(); items=[x for x in all_items if needle in json.dumps(x).lower()]
+            payload={"events":items,"source_count":len(all_items)}
+        await job_patch(jid,progress=55,message=f"Fetched {len(items)} events")
+        await raw_ingest(provider,f"{sport}:{date}",payload)
+        await job_patch(jid,status="completed",progress=100,result={"items":len(items)},finished_at=now())
+        emit("job","Discovery completed",job_id=jid,provider=provider,sport=sport,items=len(items))
     except Exception as e:
-        j["status"]="failed"; j["error"]=str(e); emit("error","Discovery failed",job_id=jid,error=str(e))
+        await job_patch(jid,status="failed",error=str(e),finished_at=now()); emit("error","Discovery failed",job_id=jid,error=str(e))
 
-DASH="""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width"><title>SDE Live</title><style>body{font-family:system-ui;background:#0b1020;color:#e8eefc;margin:0;padding:24px}.card{background:#131b31;border:1px solid #263250;border-radius:14px;padding:18px;margin:12px 0}.ok{color:#62e6a7}pre{white-space:pre-wrap;word-break:break-word;color:#b9c7e8}h1{margin-bottom:4px}</style></head><body><h1>Sports Data Engine</h1><p class=ok>● LIVE</p><div class=card><h3>System</h3><pre id=s>loading…</pre></div><div class=card><h3>Jobs</h3><pre id=j>loading…</pre></div><div class=card><h3>Live feed</h3><pre id=f></pre></div><script>async function r(){s.textContent=JSON.stringify(await(await fetch('/status')).json(),null,2);j.textContent=JSON.stringify(await(await fetch('/jobs')).json(),null,2)}r();setInterval(r,5000);let es=new EventSource('/progress/stream');es.onmessage=e=>{f.textContent=e.data+'\n'+f.textContent.slice(0,12000)}</script></body></html>"""
-
+DASH="""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width"><title>SDE Live</title><style>body{font-family:system-ui;background:#0b1020;color:#e8eefc;margin:auto;max-width:1100px;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.card{background:#131b31;border:1px solid #263250;border-radius:14px;padding:18px;margin:12px 0}.ok{color:#62e6a7}pre{white-space:pre-wrap;word-break:break-word;color:#b9c7e8}button{padding:9px 13px;border:0;border-radius:8px;margin:4px}</style></head><body><h1>Sports Data Engine <small>v0.4</small></h1><p class=ok>● LIVE</p><div class=grid><div class=card><h3>System</h3><pre id=s>loading…</pre></div><div class=card><h3>Providers</h3><pre id=p>loading…</pre></div></div><div class=card><h3>Jobs</h3><pre id=j>loading…</pre></div><div class=card><h3>Live feed</h3><pre id=f></pre></div><script>async function r(){s.textContent=JSON.stringify(await(await fetch('/status')).json(),null,2);p.textContent=JSON.stringify(await(await fetch('/providers')).json(),null,2);j.textContent=JSON.stringify(await(await fetch('/jobs')).json(),null,2)}r();setInterval(r,5000);let es=new EventSource('/progress/stream');es.onmessage=e=>{f.textContent=e.data+'\n'+f.textContent.slice(0,14000)}</script></body></html>"""
 @app.get("/dashboard",response_class=HTMLResponse)
 async def dashboard(): return DASH

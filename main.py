@@ -29,7 +29,8 @@ def emit(kind,message,**data):
 async def startup():
     emit("system","SDE v0.5 online",persistent=bool(SUPABASE_KEY))
     if SUPABASE_KEY:
-        asyncio.create_task(bootstrap_collectors())\n        asyncio.create_task(collection_loop())
+        asyncio.create_task(bootstrap_collectors())
+        asyncio.create_task(collection_loop())
 
 async def collection_loop():
     await asyncio.sleep(15)

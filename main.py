@@ -31,6 +31,30 @@ async def startup():
     if SUPABASE_KEY:
         asyncio.create_task(bootstrap_collectors())
         asyncio.create_task(collection_loop())
+        asyncio.create_task(historical_polymarket_loop())
+
+async def historical_polymarket_loop():
+    await asyncio.sleep(45)
+    offset=0
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=45) as client:
+                response=await client.get("https://gamma-api.polymarket.com/events",params={"closed":"true","limit":50,"offset":offset,"order":"endDate","ascending":"false"})
+                response.raise_for_status(); batch=response.json()
+            sports=[]
+            for item in batch:
+                blob=json.dumps(item).lower()
+                if any(k in blob for k in ("football","soccer","tennis","nfl","nba","mlb","nhl","ufc","mma","cricket","rugby")): sports.append(item)
+            if sports:
+                await raw_ingest("polymarket",f"historical:{offset}",{"events":sports,"source_count":len(batch)})
+                await normalize_polymarket(sports,"football")
+                emit("backfill","Historical Polymarket page processed",offset=offset,sports=len(sports))
+            offset += 50
+            if not batch: offset=0
+        except Exception as e:
+            emit("error","Historical Polymarket backfill page failed",offset=offset,error=str(e))
+        await asyncio.sleep(20)
+
 
 async def collection_loop():
     await asyncio.sleep(15)

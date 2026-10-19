@@ -78,6 +78,50 @@ async def normalize_polymarket(items,sport):
                 snap_count+=1
     return event_count,snap_count
 
+async def polymarket_price_history(token_id,event_id,market_id,start_ts=None,end_ts=None):
+    params={"market":token_id,"fidelity":1}
+    if start_ts is not None: params["startTs"]=start_ts
+    if end_ts is not None: params["endTs"]=end_ts
+    if start_ts is None and end_ts is None: params["interval"]="max"
+    async with httpx.AsyncClient(timeout=45) as client:
+        response=await client.get("https://clob.polymarket.com/prices-history",params=params)
+        response.raise_for_status(); history=response.json().get("history",[])
+    rows=[]
+    for point in history:
+        if point.get("t") is None or point.get("p") is None: continue
+        rows.append({"event_id":event_id,"venue":"polymarket","market_id":market_id,"outcome":token_id,"price":point["p"],"observed_at":datetime.fromtimestamp(int(point["t"]),timezone.utc).isoformat(),"payload":{"stream":"clob_price_history","token_id":token_id}})
+    for i in range(0,len(rows),250):
+        await db("POST","prediction_market_snapshots",rows[i:i+250])
+    return len(rows)
+
+async def polymarket_book_snapshot(token_id,event_id,market_id):
+    async with httpx.AsyncClient(timeout=30) as client:
+        response=await client.get("https://clob.polymarket.com/book",params={"token_id":token_id})
+        response.raise_for_status(); book=response.json()
+    bids=book.get("bids") or []; asks=book.get("asks") or []
+    def px(x):
+        try: return float(x.get("price"))
+        except: return None
+    bb=max([px(x) for x in bids if px(x) is not None],default=None)
+    ba=min([px(x) for x in asks if px(x) is not None],default=None)
+    await db("POST","prediction_market_books",{"event_id":event_id,"venue":"polymarket","market_id":market_id,"token_id":token_id,"best_bid":bb,"best_ask":ba,"spread":(ba-bb if ba is not None and bb is not None else None),"bids":bids,"asks":asks,"observed_at":now()})
+    return 1
+
+async def backfill_polymarket_event(item,event_id):
+    total=0; books=0
+    for market in item.get("markets") or []:
+        market_id=str(market.get("id") or market.get("conditionId") or item.get("id"))
+        tokens=market.get("clobTokenIds") or []
+        if isinstance(tokens,str):
+            try: tokens=json.loads(tokens)
+            except: tokens=[]
+        for token in tokens:
+            try: total+=await polymarket_price_history(str(token),event_id,market_id)
+            except Exception as e: emit("warning","CLOB history unavailable",market_id=market_id,error=str(e))
+            try: books+=await polymarket_book_snapshot(str(token),event_id,market_id)
+            except Exception as e: emit("warning","CLOB book unavailable",market_id=market_id,error=str(e))
+    return total,books
+
 async def bootstrap_collectors():
     await asyncio.sleep(3)
     try:
@@ -102,7 +146,7 @@ async def providers(): return {"providers":{"sofascore":"blocked-on-render","pol
 async def status():
     counts={}
     if SUPABASE_KEY:
-        for table in ("events","event_snapshots","odds_snapshots","prediction_market_snapshots","raw_ingestions"):
+        for table in ("events","event_snapshots","odds_snapshots","prediction_market_snapshots","prediction_market_trades","prediction_market_books","raw_ingestions"):
             try:
                 async with httpx.AsyncClient(timeout=15) as c:
                     h=headers(); h["Prefer"]="count=exact"; r=await c.get(f"{SUPABASE_URL}/rest/v1/{table}?select=id&limit=1",headers=h); counts[table]=r.headers.get("content-range","0/0").split("/")[-1]

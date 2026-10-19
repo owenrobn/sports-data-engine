@@ -77,6 +77,8 @@ async def normalize_polymarket(items,sport):
                 except: price=None
                 await db("POST","prediction_market_snapshots",{"event_id":eid,"venue":"polymarket","market_id":mid or pid,"outcome":str(outcome),"price":price,"volume":m.get("volumeNum") or m.get("volume"),"liquidity":m.get("liquidityNum") or m.get("liquidity"),"observed_at":now(),"payload":{"question":m.get("question"),"slug":m.get("slug")}})
                 snap_count+=1
+        hist,books=await backfill_polymarket_event(item,eid)
+        snap_count+=hist
     return event_count,snap_count
 
 async def polymarket_price_history(token_id,event_id,market_id,start_ts=None,end_ts=None):
@@ -208,7 +210,10 @@ async def run_discovery(jid,provider,sport,date):
             payload={"events":items,"source_count":len(all_items)}
         await job_patch(jid,progress=55,message=f"Fetched {len(items)} events")
         await raw_ingest(provider,f"{sport}:{date}",payload)
-        await job_patch(jid,status="completed",progress=100,result={"items":len(items)},finished_at=now())
+        normalized_events=0; market_snapshots=0
+        if provider=="polymarket":
+            normalized_events,market_snapshots=await normalize_polymarket(items,sport)
+        await job_patch(jid,status="completed",progress=100,result={"items":len(items),"normalized_events":normalized_events,"market_snapshots":market_snapshots},finished_at=now())
         emit("job","Discovery completed",job_id=jid,provider=provider,sport=sport,items=len(items))
     except Exception as e:
         await job_patch(jid,status="failed",error=str(e),finished_at=now()); emit("error","Discovery failed",job_id=jid,error=str(e))

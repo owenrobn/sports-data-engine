@@ -26,7 +26,25 @@ def emit(kind,message,**data):
     item={"ts":now(),"kind":kind,"message":message,**data}; mem_events.insert(0,item); del mem_events[500:]
 
 @app.on_event("startup")
-async def startup(): emit("system","SDE v0.4 online",persistent=bool(SUPABASE_KEY))
+async def startup():
+    emit("system","SDE v0.4 online",persistent=bool(SUPABASE_KEY))
+    if SUPABASE_KEY:
+        asyncio.create_task(bootstrap_collectors())
+
+async def bootstrap_collectors():
+    await asyncio.sleep(3)
+    try:
+        existing=await db("GET","ingestion_jobs",query="?select=id&limit=1")
+        if existing:
+            emit("system","Bootstrap already completed; skipping duplicate seed")
+            return
+        date=datetime.now(timezone.utc).date().isoformat()
+        for provider in ("sofascore","polymarket"):
+            jid=await create_job(provider,"football",date)
+            asyncio.create_task(run_discovery(jid,provider,"football",date))
+        emit("system","Initial football collectors launched",date=date)
+    except Exception as e:
+        emit("error","Bootstrap launch failed",error=str(e))
 @app.get("/")
 async def root(): return RedirectResponse("/dashboard")
 @app.get("/health")

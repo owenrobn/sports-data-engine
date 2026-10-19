@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 import httpx
 
-app=FastAPI(title="Sports Data Engine",version="0.4.0")
+app=FastAPI(title="Sports Data Engine",version="0.5.0")
 SUPABASE_URL=os.getenv("SUPABASE_URL","").rstrip("/")
 SUPABASE_KEY=os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 mem_events=[]; mem_jobs={}
@@ -27,9 +27,56 @@ def emit(kind,message,**data):
 
 @app.on_event("startup")
 async def startup():
-    emit("system","SDE v0.4 online",persistent=bool(SUPABASE_KEY))
+    emit("system","SDE v0.5 online",persistent=bool(SUPABASE_KEY))
     if SUPABASE_KEY:
-        asyncio.create_task(bootstrap_collectors())
+        asyncio.create_task(bootstrap_collectors())\n        asyncio.create_task(collection_loop())
+
+async def collection_loop():
+    await asyncio.sleep(15)
+    while True:
+        try:
+            date=datetime.now(timezone.utc).date().isoformat()
+            for provider in ("polymarket","thesportsdb"):
+                jid=await create_job(provider,"football",date)
+                asyncio.create_task(run_discovery(jid,provider,"football",date))
+            emit("scheduler","Scheduled football collection launched",date=date)
+        except Exception as e: emit("error","Scheduled collection launch failed",error=str(e))
+        await asyncio.sleep(3600)
+
+async def sport_id(slug):
+    rows=await db("GET","sports",query=f"?select=id&slug=eq.{slug}&limit=1")
+    return rows[0]["id"] if rows else None
+
+async def normalize_polymarket(items,sport):
+    sid=await sport_id(sport); event_count=0; snap_count=0
+    if not sid: return event_count,snap_count
+    for item in items:
+        pid=str(item.get("id") or item.get("slug") or "")
+        if not pid: continue
+        name=item.get("title") or item.get("question") or item.get("slug") or pid
+        mapping=await db("GET","provider_mappings",query=f"?select=canonical_id&provider=eq.polymarket&entity_type=eq.event&provider_entity_id=eq.{pid}&limit=1")
+        if mapping: eid=mapping[0]["canonical_id"]
+        else:
+            er=await db("POST","events",{"sport_id":sid,"name":name,"starts_at":item.get("startDate") or item.get("start_date"),"status":"active" if item.get("active") else "scheduled","metadata":{"source":"polymarket","slug":item.get("slug")}})
+            eid=er[0]["id"]; event_count+=1
+            await db("POST","provider_mappings",{"provider":"polymarket","entity_type":"event","provider_entity_id":pid,"canonical_id":eid})
+        markets=item.get("markets") or []
+        for m in markets:
+            mid=str(m.get("id") or m.get("conditionId") or "")
+            outcomes=m.get("outcomes") or []
+            prices=m.get("outcomePrices") or []
+            if isinstance(outcomes,str):
+                try: outcomes=json.loads(outcomes)
+                except: outcomes=[outcomes]
+            if isinstance(prices,str):
+                try: prices=json.loads(prices)
+                except: prices=[]
+            for i,outcome in enumerate(outcomes):
+                try: price=float(prices[i]) if i<len(prices) else None
+                except: price=None
+                await db("POST","prediction_market_snapshots",{"event_id":eid,"venue":"polymarket","market_id":mid or pid,"outcome":str(outcome),"price":price,"volume":m.get("volumeNum") or m.get("volume"),"liquidity":m.get("liquidityNum") or m.get("liquidity"),"observed_at":now(),"payload":{"question":m.get("question"),"slug":m.get("slug")}})
+                snap_count+=1
+    return event_count,snap_count
 
 async def bootstrap_collectors():
     await asyncio.sleep(3)
@@ -48,9 +95,9 @@ async def bootstrap_collectors():
 @app.get("/")
 async def root(): return RedirectResponse("/dashboard")
 @app.get("/health")
-async def health(): return {"ok":True,"service":"sports-data-engine","version":"0.4.0","database":bool(SUPABASE_KEY),"time":now()}
+async def health(): return {"ok":True,"service":"sports-data-engine","version":"0.5.0","database":bool(SUPABASE_KEY),"time":now()}
 @app.get("/providers")
-async def providers(): return {"providers":{"sofascore":"active","polymarket":"active","statsbomb":"backfill","football-data":"backfill","thesportsdb":"fallback"},"sports":["football","tennis"]}
+async def providers(): return {"providers":{"sofascore":"blocked-on-render","polymarket":"active","statsbomb":"backfill","football-data":"backfill","thesportsdb":"active-fallback"},"sports":["football","tennis"]}
 @app.get("/status")
 async def status():
     counts={}
@@ -92,13 +139,19 @@ async def raw_ingest(provider,resource_id,payload):
 
 @app.post("/jobs/discover/{provider}/{sport}/{date}")
 async def discover(provider:str,sport:str,date:str):
-    if provider not in ("sofascore","polymarket"): raise HTTPException(400,"cloud discovery currently supports sofascore or polymarket")
+    if provider not in ("sofascore","polymarket","thesportsdb"): raise HTTPException(400,"cloud discovery currently supports sofascore or polymarket")
     jid=await create_job(provider,sport,date); asyncio.create_task(run_discovery(jid,provider,sport,date)); return {"job_id":jid}
 
 async def run_discovery(jid,provider,sport,date):
     await job_patch(jid,status="running",progress=10,started_at=now()); emit("job","Discovery started",job_id=jid,provider=provider,sport=sport)
     try:
-        if provider=="sofascore":
+        if provider=="thesportsdb":
+            key=os.getenv("THESPORTSDB_KEY","123")
+            async with httpx.AsyncClient(timeout=30) as client:
+                response=await client.get(f"https://www.thesportsdb.com/api/v1/json/{key}/eventsday.php",params={"d":date,"s":"Soccer"})
+                response.raise_for_status(); payload=response.json()
+            items=payload.get("events") or []
+        elif provider=="sofascore":
             url=f"https://www.sofascore.com/api/v1/sport/{sport}/scheduled-events/{date}"
             async with httpx.AsyncClient(timeout=30,headers={"User-Agent":"SDE/0.4"}) as c:
                 r=await c.get(url); r.raise_for_status(); payload=r.json()
@@ -115,6 +168,6 @@ async def run_discovery(jid,provider,sport,date):
     except Exception as e:
         await job_patch(jid,status="failed",error=str(e),finished_at=now()); emit("error","Discovery failed",job_id=jid,error=str(e))
 
-DASH="""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width"><title>SDE Live</title><style>body{font-family:system-ui;background:#0b1020;color:#e8eefc;margin:auto;max-width:1100px;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.card{background:#131b31;border:1px solid #263250;border-radius:14px;padding:18px;margin:12px 0}.ok{color:#62e6a7}pre{white-space:pre-wrap;word-break:break-word;color:#b9c7e8}button{padding:9px 13px;border:0;border-radius:8px;margin:4px}</style></head><body><h1>Sports Data Engine <small>v0.4</small></h1><p class=ok>● LIVE</p><div class=grid><div class=card><h3>System</h3><pre id=s>loading…</pre></div><div class=card><h3>Providers</h3><pre id=p>loading…</pre></div></div><div class=card><h3>Jobs</h3><pre id=j>loading…</pre></div><div class=card><h3>Live feed</h3><pre id=f></pre></div><script>async function r(){s.textContent=JSON.stringify(await(await fetch('/status')).json(),null,2);p.textContent=JSON.stringify(await(await fetch('/providers')).json(),null,2);j.textContent=JSON.stringify(await(await fetch('/jobs')).json(),null,2)}r();setInterval(r,5000);let es=new EventSource('/progress/stream');es.onmessage=e=>{f.textContent=e.data+'\n'+f.textContent.slice(0,14000)}</script></body></html>"""
+DASH="""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width"><title>SDE Live</title><style>body{font-family:system-ui;background:#0b1020;color:#e8eefc;margin:auto;max-width:1100px;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.card{background:#131b31;border:1px solid #263250;border-radius:14px;padding:18px;margin:12px 0}.ok{color:#62e6a7}pre{white-space:pre-wrap;word-break:break-word;color:#b9c7e8}button{padding:9px 13px;border:0;border-radius:8px;margin:4px}</style></head><body><h1>Sports Data Engine <small>v0.5</small></h1><p class=ok>● LIVE</p><div class=grid><div class=card><h3>System</h3><pre id=s>loading…</pre></div><div class=card><h3>Providers</h3><pre id=p>loading…</pre></div></div><div class=card><h3>Jobs</h3><pre id=j>loading…</pre></div><div class=card><h3>Live feed</h3><pre id=f></pre></div><script>async function r(){s.textContent=JSON.stringify(await(await fetch('/status')).json(),null,2);p.textContent=JSON.stringify(await(await fetch('/providers')).json(),null,2);j.textContent=JSON.stringify(await(await fetch('/jobs')).json(),null,2)}r();setInterval(r,5000);let es=new EventSource('/progress/stream');es.onmessage=e=>{f.textContent=e.data+'\n'+f.textContent.slice(0,14000)}</script></body></html>"""
 @app.get("/dashboard",response_class=HTMLResponse)
 async def dashboard(): return DASH

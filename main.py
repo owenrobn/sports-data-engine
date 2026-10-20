@@ -37,6 +37,7 @@ async def startup():
         asyncio.create_task(ingest_tennisvisuals_pbp())
         asyncio.create_task(build_event_market_timeline())
         asyncio.create_task(link_sports_markets())
+        asyncio.create_task(backfill_polymarket_catalog())
 
 SPORT_TERMS={
  "football":["soccer","football","premier league","champions league","la liga","serie a","bundesliga","ligue 1","mls","uefa","fifa"],
@@ -356,6 +357,31 @@ async def link_sports_markets():
             emit("linker","Sports market matching pass complete",events=len(events),markets=len(markets))
         except Exception as ex: emit("error","Sports market linker failed",error=str(ex))
         await asyncio.sleep(900)
+
+async def backfill_polymarket_catalog():
+    offset=0
+    async with httpx.AsyncClient(timeout=60) as client:
+        while True:
+            try:
+                r=await client.get("https://gamma-api.polymarket.com/events",params={"closed":"true","limit":100,"offset":offset})
+                items=r.json() if r.status_code==200 else []
+                if not isinstance(items,list) or not items: break
+                kept=0
+                for item in items:
+                    sport=classify_sport(item)
+                    if sport not in ("football","tennis"): continue
+                    kept+=1; pid=str(item.get("id") or item.get("slug") or "")
+                    name=item.get("title") or item.get("question") or item.get("slug") or pid
+                    for m in item.get("markets") or []:
+                        mid=str(m.get("id") or m.get("conditionId") or "")
+                        if not mid: continue
+                        await db("POST","polymarket_market_catalog",{"market_id":mid,"polymarket_event_id":pid,"condition_id":m.get("conditionId"),"question":m.get("question") or name,"slug":m.get("slug"),"sport":sport,"start_time":m.get("startDate") or item.get("startDate"),"end_time":m.get("endDate") or item.get("endDate"),"closed":bool(m.get("closed")),"resolved":bool(m.get("resolved")),"metadata":{"event_title":name,"event_slug":item.get("slug"),"outcomes":m.get("outcomes"),"clobTokenIds":m.get("clobTokenIds")}},prefer="resolution=merge-duplicates")
+                emit("backfill","Polymarket football+tennis catalog page",offset=offset,kept=kept)
+                offset+=100
+                if len(items)<100: break
+                await asyncio.sleep(1)
+            except Exception as ex:
+                emit("error","Polymarket catalog backfill failed",offset=offset,error=str(ex)); break
 
 async def bootstrap_collectors():
     await asyncio.sleep(3)

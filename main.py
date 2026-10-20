@@ -562,6 +562,9 @@ install_bookmakers(globals())
 from engine_delivery import install as install_delivery
 install_delivery(globals())
 
+from ledger_audit import install as install_ledger
+install_ledger(globals())
+
 @app.on_event('shutdown')
 async def close_shared_clients():
     if DB_CLIENT is not None: await DB_CLIENT.aclose()

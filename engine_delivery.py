@@ -126,7 +126,7 @@ def install(ctx):
     @app.get('/engine/{event_id}',response_class=HTMLResponse)
     async def view(event_id:uuid.UUID):
         p=await envelope(event_id)
-        body='<p><a href="/context?sport='+p['sport']+'">Match list</a> · <a href="/data/engine/'+str(event_id)+'">Combined engine JSON</a> · <a href="/operations">Operations</a></p><p>Decision time: '+esc(p['decision_time'])+'. Engine ready: False.</p>'
+        body='<p><a href="/context?sport='+p['sport']+'">Match list</a> · <a href="/data/engine/'+str(event_id)+'">Combined engine JSON</a> · <a href="/ledger/'+str(event_id)+'">LEDGER audit</a> · <a href="/operations">Operations</a></p><p>Decision time: '+esc(p['decision_time'])+'. Engine ready: False.</p>'
         body+=table(['Missing or unverified input'],[[esc(x)] for x in p['blockers']])
         body+='<details><summary>All evidence and receipts</summary><pre>'+esc(json.dumps(p,indent=2))+'</pre></details>'
         return page(p['match']+' · Unified SDE evidence',body)

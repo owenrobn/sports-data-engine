@@ -55,3 +55,13 @@ Current-match evidence: `/live/{event_id}` and `/data/live/{event_id}?as_of=...`
 - Current database usage exceeds the free allowance. Unique records are retained; capacity needs an approved infrastructure choice. Continuous collection also requires hosting that stays awake.
 
 Provider failures are isolated per match/competition; a partial failed scan does not erase successful receipts. Football draws are retained as draws. Latest eligible result corrections replace earlier observations in recent-form aggregation. Tennis enrichment uses the source tournament and competition IDs with the core competition resource; coverage is empirically monitored and not guaranteed.
+
+
+## LEDGER capture and resolution audit
+`/ledger/{event_id}` and `/data/ledger/{event_id}?as_of=...` expose public capture/settlement-source receipts. Both sports poll up to 12 linked markets per pass with a persistent round-robin cursor. Gamma market identity and the V2 resolution state must agree on the condition and a one-hot payout before an outcome is scorable. Closed flags, disputed/proposed states, missing data and fractional/refund payouts never imply a winning outcome. This is venue-reported resolution, not independent blockchain finality or account payment confirmation. Identical resolution states are not duplicated.
+
+Captures are reconstructed from retained capture intervals and book receipts for **all** tokens, with a five-second synchronization limit. Early and near-scheduled-start samples are distinct from actual-start/closing-line evidence. Current schedules are not historical schedule receipts. Actual kickoff, actual finish, a 24-hour outcome SLA and CLV remain unverified when their required evidence is absent.
+
+`POST /ledger/forecasts` and `GET /data/ledger/private/{event_id}` require `X-SDE-Admin-Token` matching `SDE_ADMIN_TOKEN`; absent configuration denies access. Forecasts contain a UUID forecast_id, event_id, market_id, model, model_version, inputs_as_of and a complete token-ID probability vector. They are archived immutably using server receipt time, require a linked open market and a future scheduled start, and reject a source already showing in-progress/completed status. Do not backfill historical forecasts as prospective records. Model inputs are attested, not independently validated. Public audit pages exclude forecasts and scores. No account balances, API keys or personal trading fills belong in this endpoint.
+
+Private audit scores use the multiclass sum Brier convention and separately report binary scalar Brier. Scheduled-start-based scores are labelled provisional until actual-start eligibility is verified. Actual realized PnL is never inferred from a winning outcome or hypothetical book fill.

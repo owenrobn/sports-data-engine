@@ -325,7 +325,7 @@ def install(ctx):
         events=[e for e in events if (e.get('metadata') or {}).get('source')!='polymarket' and not any(norm(n) in ('tbd','unknown','bye') for n in (e.get('metadata') or {}).get('participants',[])) and date(e.get('starts_at')) and date(e['starts_at'])<=clock()+timedelta(days=3)]
         events.sort(key=lambda e:(0 if date(e['starts_at'])>=clock() else 1,abs((date(e['starts_at'])-clock()).total_seconds())))
         body='<p><a href="?sport=football">Football</a> · <a href="?sport=tennis">Tennis</a> · <a href="/context/providers">Source access</a> · <a href="/context/players?sport='+sport+'">Collected player profiles</a></p><p>Recent form uses 7 and 14 days before the decision cutoff. Injuries require a recent confirmation. Missing information stays unknown. Past matches may lack archived pre-match observations.</p>'
-        body+=table(['Match','Start','Evidence'],[[esc(e['name']),esc(e.get('starts_at')),f'<a href="/context/match/{e["id"]}">View input package</a> · <a href="/live/{e["id"]}">Current match state</a> · <a href="/engine/{e["id"]}">Unified evidence</a>'] for e in events])
+        body+=table(['Match','Start','Evidence'],[[esc(e['name']),esc(e.get('starts_at')),f'<a href="/context/match/{e["id"]}">View input package</a> · <a href="/live/{e["id"]}">Current match state</a> · <a href="/engine/{e["id"]}">Unified evidence</a> · <a href="/ledger/{e["id"]}">LEDGER audit</a>'] for e in events])
         return page('IMG-RAE / LEDGER · Recent evidence',body)
     @app.get('/context/match/{event_id}',response_class=HTMLResponse)
     async def view(event_id:uuid.UUID):

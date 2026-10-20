@@ -12,6 +12,7 @@ import unicodedata
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode, quote
 import httpx
+from runtime_policy import policy
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
 
@@ -116,7 +117,7 @@ async def espn(sport):
     checkpoints=await get('backfill_checkpoints',provider='eq.espn',stream='eq.'+sport,cursor_key='eq.catalog_dates',limit=1)
     offset=int(checkpoints[0].get('cursor_value') or 0) if checkpoints else 0
     if offset>=len(history): offset=0
-    dates+=history[offset:offset+2]
+    if policy()['historical_fixture_expansion_enabled']: dates+=history[offset:offset+2]
     for date in dates:
         for league in leagues:
             payload=await fetch(f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard',{'dates':date,'limit':1000})
@@ -180,7 +181,7 @@ async def catalog(sport):
             items.extend(p.get('events',[]))
         except (httpx.HTTPError,RuntimeError):
             CTX['emit']('warning','Supplementary market search unavailable',sport=sport)
-    for closed in ('false','true'):
+    for closed in (('false',) if policy()['free_mode'] else ('false','true')):
         cp=await get('backfill_checkpoints',provider='eq.polymarket',stream='eq.'+sport,cursor_key='eq.'+closed,limit=1)
         offset=int(cp[0].get('cursor_value') or 0) if cp else 0
         batch=await fetch('https://gamma-api.polymarket.com/events',{'closed':closed,'limit':100,'offset':offset,'order':'id','ascending':'false'})
@@ -205,6 +206,7 @@ async def catalog(sport):
             if not mid: continue
             tokens=arr(m.get('clobTokenIds')); outcomes=arr(m.get('outcomes'))
             start=m.get('gameStartTime') or event.get('startTime')
+            if policy()['free_mode'] and dt(start) and dt(start)<datetime.now(timezone.utc)-timedelta(days=14): continue
             fingerprint=closed_price_fingerprint(m)
             catalog_rows.append({'market_id':mid,'polymarket_event_id':str(event['id']),'condition_id':m.get('conditionId'),'question':m.get('question'),'slug':m.get('slug'),'sport':sport,'start_time':start,'end_time':m.get('endDate'),'closed':bool(m.get('closed')),'resolved':bool(m.get('resolved')),'observed_at':stamp(),'metadata':{'event_title':event.get('title'),'event_slug':event.get('slug'),'outcomes':outcomes,'clobTokenIds':tokens,'source':'gamma','source_url':'https://gamma-api.polymarket.com/events','start_time_field':'gameStartTime or event.startTime','market_type':m.get('sportsMarketType'),'closed_price_fingerprint':fingerprint,'event':{k:v for k,v in event.items() if k!='markets'}}})
             prices=arr(m.get('outcomePrices'))
@@ -258,25 +260,45 @@ async def link(sport):
     return total
 
 async def market_history(sport):
+    settings=policy()
     links=await pages('market_match_links',select='event_id,market_id,condition_id,metadata',order='id.asc'); total=0
-    for l in links:
+    links=[l for l in links if (l.get('metadata') or {}).get('sport')==sport]
+    if settings['free_mode']:
+        sid=await sid_for(sport);now=datetime.now(timezone.utc)
+        events=await pages('events',select='id',sport_id='eq.'+sid,starts_at='gte.'+(now-timedelta(days=14)).isoformat(),**{'and':'(starts_at.lte.'+(now+timedelta(days=3)).isoformat()+')'},order='id.asc')
+        allowed={e['id'] for e in events};links=[l for l in links if l['event_id'] in allowed]
+        cp=await get('backfill_checkpoints',provider='eq.free_recent_prices',stream='eq.'+sport,cursor_key='eq.market_offset',limit=1)
+        offset=int(cp[0].get('cursor_value') or 0) if cp else 0
+        if offset>=len(links): offset=0
+        batch=links[offset:offset+settings['history_markets_per_sport_pass']]
+    else: batch=links
+    for l in batch:
         if (l.get('metadata') or {}).get('sport')!=sport: continue
         markets=await get('polymarket_market_catalog',select='market_id,condition_id,metadata->outcomes,metadata->clobTokenIds',market_id='eq.'+l['market_id'],limit=1)
         if not markets: continue
         m=markets[0]; meta=m; outcomes=arr(meta.get('outcomes'))
         for i,t in enumerate(arr(meta.get('clobTokenIds'))):
-            history=await fetch('https://clob.polymarket.com/prices-history',{'market':t,'interval':'max','fidelity':1})
+            params={'market':t,'interval':'max','fidelity':1}
+            if settings['free_mode']:
+                params={'market':t,'startTs':int((datetime.now(timezone.utc)-timedelta(days=14)).timestamp()),'endTs':int(datetime.now(timezone.utc).timestamp()),'fidelity':settings['recent_history_fidelity_minutes']}
+            history=await fetch('https://clob.polymarket.com/prices-history',params)
             rows=[{'event_id':l['event_id'],'venue':'polymarket','market_id':m['market_id'],'condition_id':m.get('condition_id'),'token_id':str(t),'outcome':outcomes[i] if i<len(outcomes) else None,'price':p['p'],'effective_at':datetime.fromtimestamp(int(p['t']),timezone.utc).isoformat(),'observed_at':stamp(),'payload':{'stream':'clob_price_history','source':'clob','token_id':str(t)}} for p in history.get('history',[]) if p.get('t') is not None and p.get('p') is not None]
             for j in range(0,len(rows),250): await put('prediction_market_snapshots',rows[j:j+250])
             total+=len(rows)
             try: await CTX['polymarket_book_snapshot'](str(t),l['event_id'],m['market_id'])
             except httpx.HTTPStatusError as ex:
                 if ex.response.status_code!=404: raise
-        if m.get('condition_id'): await CTX['polymarket_trades'](m['condition_id'],l['event_id'])
+        if m.get('condition_id') and settings['deep_trade_backfill_enabled']: await CTX['polymarket_trades'](m['condition_id'],l['event_id'])
+    if settings['free_mode']:
+        await put('backfill_checkpoints',{'provider':'free_recent_prices','stream':sport,'cursor_key':'market_offset','cursor_value':str(offset+len(batch)),'status':'running','updated_at':stamp()},'provider,stream,cursor_key',True)
     return total
 
 async def timeline(sport):
     links=await pages('market_match_links',order='id.asc'); total=0
+    if policy()['free_mode']:
+        sid=await sid_for(sport);now=datetime.now(timezone.utc)
+        events=await pages('events',select='id',sport_id='eq.'+sid,starts_at='gte.'+(now-timedelta(days=14)).isoformat(),**{'and':'(starts_at.lte.'+(now+timedelta(days=3)).isoformat()+')'},order='id.asc')
+        allowed={e['id'] for e in events};links=[l for l in links if l['event_id'] in allowed]
     for l in links:
         if (l.get('metadata') or {}).get('sport')!=sport: continue
         states=await pages(sport+'_match_events',event_id='eq.'+l['event_id'],order='id.asc')
@@ -368,7 +390,10 @@ async def run_engine(ctx):
         while True:
             await asyncio.gather(tracked('statsbomb','football',ctx['ingest_statsbomb_open']),tracked('tennisvisuals_v2','tennis',tennis_points))
             await asyncio.sleep(900)
-    BACKGROUND.append(asyncio.create_task(archives()))
+    if policy()['archive_backfill_enabled']:
+        BACKGROUND.append(asyncio.create_task(archives()))
+    else:
+        ctx['emit']('policy','Free mode: automatic archive expansion paused; retained history remains available')
     while True:
         # Separate lanes give both sports equal time even when one provider is slow.
         async def lane(sport):

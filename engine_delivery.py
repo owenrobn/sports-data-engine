@@ -104,6 +104,8 @@ async def envelope(event_id,as_of=None):
     return {'schema_version':'2.0','event_id':str(event_id),'match':context['match'],'sport':sport,'decision_time':decision.isoformat(),'pre_match_cutoff':context['decision_cutoff'],'engine_ready':False,'readiness_scope':'SDE evidence contract, not a prediction or trade authorization','blockers':sorted(set(blockers)),'recent_performance':context,'live_state':live,'normalized_live_inputs':lf,'pre_match_source_summary':summaries[0] if summaries else None,'weather_receipt':weather[0] if weather else None,'markets':markets,'bookmaker_complete_sets':fair_odds(odds,['home','draw','away'] if sport=='football' else ['player1','player2'],decision),'private_account_data':None,'capture_policy':{'performance_days':[7,14],'live_max_retrieval_age_seconds':120,'quotes_max_age_seconds':120,'outcome_synchronization_seconds':5,'historical_catalog_mapping':'unknown unless archived by decision time','actual_kickoff_verified':False},'requirements':context['rae_requirements']}
 
 async def operations():
+    from runtime_policy import policy
+    runtime=policy()
     runs=await get('sde_provider_runs',order='started_at.desc',limit=250)
     latest={}
     for r in runs: latest.setdefault((r['sport'],r['provider']),r)
@@ -111,12 +113,13 @@ async def operations():
     for (sport,provider),r in latest.items():
         start=date(r.get('started_at'));age=(clock()-start).total_seconds() if start else None
         ttl=180 if provider in ('live_evidence','executable_books') else 1800 if provider in ('recent_evidence','physical_profiles','espn_summary','venue_weather') else 7200
-        stale=age is None or age>ttl
-        providers.append({'stale':stale,'expected_max_age_seconds':ttl,'sport':sport,'provider':provider,'status':r['status'],'records':r.get('records'),'age_seconds':round(age) if age is not None else None,'stalled':bool(r['status']=='running' and age is not None and age>660),'last_error':r.get('error'),'started_at':r.get('started_at'),'finished_at':r.get('finished_at')})
+        paused=not runtime['archive_backfill_enabled'] and provider in ('statsbomb','tennisvisuals_v2')
+        stale=not paused and (age is None or age>ttl)
+        providers.append({'paused_by_policy':paused,'stale':stale,'expected_max_age_seconds':ttl,'sport':sport,'provider':provider,'status':r['status'],'records':r.get('records'),'age_seconds':round(age) if age is not None else None,'stalled':bool(r['status']=='running' and age is not None and age>660),'last_error':r.get('error'),'started_at':r.get('started_at'),'finished_at':r.get('finished_at')})
     from context_feed import provider_status
     access=provider_status()
     access_gaps=[name+' feed access is not configured.' for name in ('api_tennis','sportmonks','bookmaker_odds','tracking_data') if not access[name]['configured']]
-    return {'generated_at':clock().isoformat(),'providers':providers,'access':access,'blockers':access_gaps+['Independent fixture/benchmark feeds and private account access are not configured.','Continuous hosting and database capacity need an infrastructure plan; no paid upgrades were applied.'],'service_continuity':'Collectors run while the service is awake. Source errors and missing data are not successful coverage.'}
+    return {'runtime_policy':runtime,'generated_at':clock().isoformat(),'providers':providers,'access':access,'blockers':access_gaps+['Independent fixture/benchmark feeds and private account access are not configured.','Free hosting may sleep. Existing database history is above the free allowance; no quota compliance or continuous collection is promised. No paid upgrades are enabled.'],'service_continuity':'Collectors run while the service is awake. Source errors and missing data are not successful coverage.'}
 
 def install(ctx):
     CTX.update(ctx);app=ctx['app']
@@ -135,6 +138,7 @@ def install(ctx):
     @app.get('/operations',response_class=HTMLResponse)
     async def ops():
         p=await operations();body='<p><a href="/context">Match packages</a> · <a href="/rae">Full requirements</a> · <a href="/data/operations">Health JSON</a></p><p>'+esc(p['service_continuity'])+'</p>'
+        body+='<p>Free mode: '+esc(p['runtime_policy']['free_mode'])+'. Automatic archive expansion: '+esc(p['runtime_policy']['archive_backfill_enabled'])+'. Deep trade backfill: '+esc(p['runtime_policy']['deep_trade_backfill_enabled'])+'. Recent historical prices: '+esc(p['runtime_policy']['recent_history_fidelity_minutes'])+' minute samples.</p>'
         body+=table(['Sport','Collector','Last status','Records','Age (seconds)','Stale','Stalled','Error'],[[esc(r[k]) for k in ('sport','provider','status','records','age_seconds','stale','stalled','last_error')] for r in p['providers']])
         body+='<h2>Access and infrastructure blockers</h2><ul>'+''.join('<li>'+esc(x)+'</li>' for x in p['blockers'])+'</ul>'
         return page('SDE · Operations and remaining access',body)

@@ -108,7 +108,7 @@ async def espn(sport):
     sid=await sid_for(sport)
     known=await pages('provider_mappings',provider='eq.espn',entity_type='eq.event',order='id.asc')
     known={m['provider_entity_id']:m['canonical_id'] for m in known}
-    dates=[(datetime.now(timezone.utc)+timedelta(days=days)).strftime('%Y%m%d') for days in range(0,-8,-1)]
+    dates=[(datetime.now(timezone.utc)+timedelta(days=days)).strftime('%Y%m%d') for days in range(2,-15,-1)]
     market_dates=await pages('polymarket_market_catalog',select='market_id,start_time',sport='eq.'+sport,order='market_id.asc')
     history=sorted({dt(m.get('start_time')).strftime('%Y%m%d') for m in market_dates if dt(m.get('start_time')) and dt(m['start_time'])<=datetime.now(timezone.utc)},reverse=True)
     history=[d for d in history if d not in dates]
@@ -369,7 +369,7 @@ async def run_engine(ctx):
         await asyncio.sleep(900)
 
 STYLE='body{font-family:system-ui;max-width:1300px;margin:auto;padding:24px;background:#07101f;color:#e8eefc}a{color:#9dc8ff}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{text-align:left;border-bottom:1px solid #34445b;padding:10px;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere}section{border:1px solid #34445b;padding:16px;margin:16px 0;border-radius:10px}.scroll{overflow:auto}button,input{font:inherit}small{color:#bac6dc}svg{width:100%;height:200px}summary{cursor:pointer}'
-def page(title,body): return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>'+STYLE+'</style></head><body><nav><a href="/dashboard">Overview</a> · <a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health</a></nav><h1>'+esc(title)+'</h1>'+body+'</body></html>'
+def page(title,body): return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>'+STYLE+'</style></head><body><nav><a href="/dashboard">Overview</a> · <a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health</a> · <a href="/context">Recent physical evidence</a></nav><h1>'+esc(title)+'</h1>'+body+'</body></html>'
 def table(headers,rows): return '<div class="scroll"><table><thead><tr>'+''.join('<th scope="col">'+esc(h)+'</th>' for h in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+str(c)+'</td>' for c in r)+'</tr>' for r in rows)+'</tbody></table></div>'
 def percent(n,d): return f'{100*n/d:.1f}%' if d else 'Unknown (no declared universe)'
 async def coverage_html():
@@ -395,7 +395,7 @@ def install(ctx):
         baseline=await original()
         try: extra=await coverage_html()
         except Exception: extra='<section>Coverage temporarily unavailable. <a href="/research/health">Provider health</a></section>'
-        extra='<nav><a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health and errors</a></nav>'+extra
+        extra='<nav><a href="/context">Recent physical evidence</a> · <a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health and errors</a></nav>'+extra
         return baseline.replace('<div class=grid id=metrics>',extra+'<div class=grid id=metrics>',1)
     for r in list(app.routes):
         if getattr(r,'path',None)=='/dashboard': app.routes.remove(r)

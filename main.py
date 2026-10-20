@@ -539,3 +539,6 @@ install(globals())
 
 
 
+
+from context_feed import install as install_context
+install_context(globals())

@@ -213,7 +213,8 @@ async def link(sport):
     sid=await sid_for(sport)
     events=await pages('events',select='id,name,starts_at,metadata',sport_id='eq.'+sid,order='id.asc')
     markets=await pages('polymarket_market_catalog',select='market_id,polymarket_event_id,condition_id,question,start_time,metadata->event_title,metadata->market_type',sport='eq.'+sport,order='market_id.asc')
-    for m in markets: m['metadata']={'event_title':m.get('event_title'),'market_type':m.get('market_type')}; total=0
+    total=0
+    for m in markets: m['metadata']={'event_title':m.get('event_title'),'market_type':m.get('market_type')}
     for e in events:
         if (e.get('metadata') or {}).get('source')=='polymarket': continue
         for m in markets:

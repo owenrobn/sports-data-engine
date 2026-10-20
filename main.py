@@ -311,14 +311,13 @@ const esc=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const short=x=>x?String(x).slice(0,16)+'…':'—'; const n=x=>x==null?'—':x;
 async function refresh(){try{
  const [s,d,j]=await Promise.all([fetch('/status').then(x=>x.json()),fetch('/data/overview').then(x=>x.json()),fetch('/jobs').then(x=>x.json())]);
- metrics.innerHTML=Object.entries(s.counts||{}).map(([k,v])=>'<div class=card><div class=muted>'+esc(k.replaceAll('_',' '))+'</div><div class=metric>'+esc(v)+'</div></div>').join('');
- events.innerHTML=(d.events||[]).map(x=>'<tr><td>'+esc(x.name)+'</td><td><span class=pill>'+esc(x.status)+'</span></td><td>'+esc(x.starts_at||'—')+'</td><td>'+esc(x.metadata?.source||'—')+'</td></tr>').join('')||'<tr><td colspan=4>No normalized events yet</td></tr>';
- markets.innerHTML=(d.markets||[]).map(x=>'<tr><td>'+esc(x.observed_at)+'</td><td>'+esc(short(x.market_id))+'</td><td>'+esc(x.outcome)+'</td><td>'+esc(n(x.price))+'</td><td>'+esc(n(x.volume))+'</td><td>'+esc(n(x.liquidity))+'</td></tr>').join('')||'<tr><td colspan=6>No market observations yet</td></tr>';
- books.innerHTML=(d.books||[]).map(x=>'<tr><td>'+esc(x.observed_at)+'</td><td>'+esc(short(x.market_id))+'</td><td>'+esc(n(x.best_bid))+'</td><td>'+esc(n(x.best_ask))+'</td><td>'+esc(n(x.spread))+'</td></tr>').join('')||'<tr><td colspan=5>No book snapshots yet</td></tr>';
- trades.innerHTML=(d.trades||[]).map(x=>'<tr><td>'+esc(x.executed_at)+'</td><td>'+esc(short(x.trader))+'</td><td>'+esc(x.side)+'</td><td>'+esc(x.outcome)+'</td><td>'+esc(n(x.price))+'</td><td>'+esc(n(x.size))+'</td></tr>').join('')||'<tr><td colspan=6>No executed trades captured yet</td></tr>';
- jobs.innerHTML=(j||[]).slice(0,30).map(x=>'<tr><td>'+esc(x.provider)+'</td><td>'+esc(x.sport)+'</td><td>'+esc(x.status)+'</td><td>'+esc(x.progress)+'%</td><td>'+esc(JSON.stringify(x.result||{}))+'</td></tr>').join('');
-}catch(e){feed.textContent='Dashboard refresh error: '+e}}
-refresh();setInterval(refresh,5000);let es=new EventSource('/progress/stream');es.onmessage=e=>{feed.textContent=e.data+'\n'+feed.textContent.slice(0,12000)}
-</script></body></html>"""
+ el('metrics').innerHTML=Object.entries(s.counts||{}).map(([k,v])=>'<div class=card><div class=muted>'+esc(k.replaceAll('_',' '))+'</div><div class=metric>'+esc(v)+'</div></div>').join('');
+ el('events').innerHTML=(d.events||[]).map(x=>'<tr><td>'+esc(x.name)+'</td><td><span class=pill>'+esc(x.status)+'</span></td><td>'+esc(x.starts_at||'—')+'</td><td>'+esc(x.metadata?.source||'—')+'</td></tr>').join('')||'<tr><td colspan=4>No normalized events yet</td></tr>';
+ el('markets').innerHTML=(d.markets||[]).map(x=>'<tr><td>'+esc(x.observed_at)+'</td><td>'+esc(short(x.market_id))+'</td><td>'+esc(x.outcome)+'</td><td>'+esc(n(x.price))+'</td><td>'+esc(n(x.volume))+'</td><td>'+esc(n(x.liquidity))+'</td></tr>').join('')||'<tr><td colspan=6>No market observations yet</td></tr>';
+ el('books').innerHTML=(d.books||[]).map(x=>'<tr><td>'+esc(x.observed_at)+'</td><td>'+esc(short(x.market_id))+'</td><td>'+esc(n(x.best_bid))+'</td><td>'+esc(n(x.best_ask))+'</td><td>'+esc(n(x.spread))+'</td></tr>').join('')||'<tr><td colspan=5>No book snapshots yet</td></tr>';
+ el('trades').innerHTML=(d.trades||[]).map(x=>'<tr><td>'+esc(x.executed_at)+'</td><td>'+esc(short(x.trader))+'</td><td>'+esc(x.side)+'</td><td>'+esc(x.outcome)+'</td><td>'+esc(n(x.price))+'</td><td>'+esc(n(x.size))+'</td></tr>').join('')||'<tr><td colspan=6>No executed trades captured yet</td></tr>';
+ el('jobs').innerHTML=(j||[]).slice(0,30).map(x=>'<tr><td>'+esc(x.provider)+'</td><td>'+esc(x.sport)+'</td><td>'+esc(x.status)+'</td><td>'+esc(x.progress)+'%</td><td>'+esc(JSON.stringify(x.result||{}))+'</td></tr>').join('');
+}catch(e){el('feed').textContent='Dashboard refresh error: '+e}}
+refresh();setInterval(refresh,5000);</script></body></html>"""
 @app.get("/dashboard",response_class=HTMLResponse)
 async def dashboard(): return DASH

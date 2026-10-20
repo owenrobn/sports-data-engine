@@ -48,7 +48,7 @@ def dt(v):
 async def db(*a,**kw): return await CTX['db'](*a,**kw)
 async def put(table,rows,keys=None,merge=False):
     if not rows: return []
-    return await db('POST',table,rows,('?'+urlencode({'on_conflict':keys}) if keys else ''),prefer='resolution='+('merge-duplicates' if merge else 'ignore-duplicates'))
+    return await db('POST',table,rows,('?'+urlencode({'on_conflict':keys}) if keys else ''),prefer='return=minimal,resolution='+('merge-duplicates' if merge else 'ignore-duplicates'))
 async def get(table,**query): return await db('GET',table,query='?'+urlencode(query)) or []
 async def pages(table,**query):
     result=[]
@@ -80,7 +80,7 @@ async def tracked(provider,sport,fn):
             msg+=' HTTP '+str(ex.response.status_code)
             try:
                 detail=ex.response.json(); msg+=' '+str(detail.get('code',''))
-                if detail.get('code') in ('21000','57014','42P01','42501','23505'): msg+=' '+str(detail.get('message',''))[:180]
+                if detail.get('code') in ('21000','57014','42P01','42501','23505','53100'): msg+=' '+str(detail.get('message',''))[:180]
             except (ValueError,AttributeError): pass
         try:
             await db('PATCH','sde_provider_runs',{'status':'failed','finished_at':stamp(),'error':msg},'?id=eq.'+rid)
@@ -159,8 +159,11 @@ async def catalog(sport):
     recent=await get('events',select='id,name,metadata,starts_at',sport_id='eq.'+sid,starts_at='gte.'+(datetime.now(timezone.utc)-timedelta(days=7)).isoformat(),order='starts_at.desc',limit=20)
     queries=[('tennis' if sport=='tennis' else 'soccer')]+[e['name'] for e in recent if (e.get('metadata') or {}).get('source')=='espn']
     for query in queries:
-        p=await fetch('https://gamma-api.polymarket.com/public-search',{'q':query,'limit_per_type':50,'events_status':'all'})
-        items.extend(p.get('events',[]))
+        try:
+            p=await fetch('https://gamma-api.polymarket.com/public-search',{'q':query,'limit_per_type':50,'events_status':'all'})
+            items.extend(p.get('events',[]))
+        except (httpx.HTTPError,RuntimeError):
+            CTX['emit']('warning','Supplementary market search unavailable',sport=sport)
     for closed in ('false','true'):
         cp=await get('backfill_checkpoints',provider='eq.polymarket',stream='eq.'+sport,cursor_key='eq.'+closed,limit=1)
         offset=int(cp[0].get('cursor_value') or 0) if cp else 0
@@ -168,17 +171,25 @@ async def catalog(sport):
         items.extend(batch)
         # Existing table has provider/stream/cursor_key uniqueness checked before writes.
         checkpoints.append((cp,closed,offset+100 if batch else 0))
+    archived={r['provider_resource_id'] for r in await pages('raw_ingestions',select='provider_resource_id',provider='eq.gamma_event',order='id.asc')}
+    seen=set()
     for event in items:
+        resource=str(event.get('id') or '')
+        if not resource or resource in seen: continue
+        seen.add(resource)
         if CTX['classify_sport'](event)!=sport:
             title=' '+norm(event.get('title',''))+' '
             exact=any(all(' '+norm(n)+' ' in title for n in (e.get('metadata') or {}).get('participants',[])) and len((e.get('metadata') or {}).get('participants',[]))==2 for e in recent)
             if not exact: continue
+        if resource not in archived:
+            await CTX['raw_ingest']('gamma_event',resource,event)
+            archived.add(resource)
         for m in event.get('markets') or []:
             mid=str(m.get('id') or '')
             if not mid: continue
             tokens=arr(m.get('clobTokenIds')); outcomes=arr(m.get('outcomes'))
             start=m.get('gameStartTime') or event.get('startTime')
-            catalog_rows.append({'market_id':mid,'polymarket_event_id':str(event['id']),'condition_id':m.get('conditionId'),'question':m.get('question'),'slug':m.get('slug'),'sport':sport,'start_time':start,'end_time':m.get('endDate'),'closed':bool(m.get('closed')),'resolved':bool(m.get('resolved')),'observed_at':stamp(),'metadata':{'event_title':event.get('title'),'event_slug':event.get('slug'),'outcomes':outcomes,'clobTokenIds':tokens,'source':'gamma','source_url':'https://gamma-api.polymarket.com/events','start_time_field':'gameStartTime or event.startTime','market_type':m.get('sportsMarketType'),'event':event}})
+            catalog_rows.append({'market_id':mid,'polymarket_event_id':str(event['id']),'condition_id':m.get('conditionId'),'question':m.get('question'),'slug':m.get('slug'),'sport':sport,'start_time':start,'end_time':m.get('endDate'),'closed':bool(m.get('closed')),'resolved':bool(m.get('resolved')),'observed_at':stamp(),'metadata':{'event_title':event.get('title'),'event_slug':event.get('slug'),'outcomes':outcomes,'clobTokenIds':tokens,'source':'gamma','source_url':'https://gamma-api.polymarket.com/events','start_time_field':'gameStartTime or event.startTime','market_type':m.get('sportsMarketType'),'event':{k:v for k,v in event.items() if k!='markets'}}})
             prices=arr(m.get('outcomePrices'))
             rows=[{'venue':'polymarket','market_id':mid,'condition_id':m.get('conditionId'),'token_id':str(t),'outcome':str(outcomes[i]) if i<len(outcomes) else None,'price':float(prices[i]) if i<len(prices) else None,'observed_at':stamp(),'payload':{'stream':'gamma_current'}} for i,t in enumerate(tokens)]
             snapshot_rows.extend(rows)
@@ -303,8 +314,12 @@ async def tennis_points():
         for m in source[offset:end]:
             p1,p2=m.get('server1'),m.get('server2')
             if not p1 or not p2 or not m.get('pbp'): continue
-            states=parse_points(m['pbp'],p1,p2)
             pid=':'.join([tour,m.get('date',''),m.get('tournament',''),m.get('round',''),p1,p2])
+            try: states=parse_points(m['pbp'],p1,p2)
+            except ValueError as ex:
+                await CTX['raw_ingest']('tennisvisuals_quarantine',pid,{'source_url':url,'row':m,'reason':str(ex)})
+                CTX['emit']('warning','Malformed tennis sequence preserved for review',provider_match_id=pid,reason=str(ex))
+                continue
             eid=await canonical('tennisvisuals_v2',pid,'tennis',p1+' vs '+p2,None,{'participants':[p1,p2],'tournament':m.get('tournament'),'source_date':m.get('date'),'time_precision':'date_only','source_local_start_time':m.get('start_time'),'surface':m.get('surface'),'round':m.get('round'),'score':m.get('score'),'tour':tour,'source_url':url,'source_attribution':'TennisVisuals tennis-match-data; research archive','discipline':'singles'},'historical')
             for s in states: s.update(event_id=eid,provider='tennisvisuals_v2',provider_event_id=uid(pid+':'+str(s['point_number'])),surface=m.get('surface'),effective_at=None,observed_at=stamp())
             for j in range(0,len(states),250): await put('tennis_match_events',states[j:j+250])

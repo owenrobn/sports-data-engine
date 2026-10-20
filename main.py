@@ -19,7 +19,8 @@ async def db(method,table,payload=None,query="",prefer=None):
         query+=("&" if query else "?")+"on_conflict="+identities[table]
     async with httpx.AsyncClient(timeout=25) as c:
         h=headers()
-        if method=="POST" and not table.startswith("rpc/"): h["Prefer"]="return=representation,"+(prefer or "resolution=ignore-duplicates")
+        if method=="POST" and not table.startswith("rpc/"): h["Prefer"]=(prefer or "resolution=ignore-duplicates")
+        if method=="POST" and not table.startswith("rpc/") and "return=" not in h["Prefer"]: h["Prefer"]="return=representation,"+h["Prefer"]
         r=await c.request(method,f"{SUPABASE_URL}/rest/v1/{table}{query}",headers=h,json=payload)
         r.raise_for_status()
         return r.json() if r.content else None
@@ -452,7 +453,7 @@ async def create_job(provider,sport,date):
 
 async def raw_ingest(provider,resource_id,payload):
     row={"provider":provider,"resource_type":"discovery","provider_resource_id":resource_id,"observed_at":now(),"retrieved_at":now(),"metadata":{"payload":payload}}
-    if SUPABASE_KEY: await db("POST","raw_ingestions",row)
+    if SUPABASE_KEY: await db("POST","raw_ingestions",row,prefer="return=minimal")
 
 @app.post("/jobs/discover/{provider}/{sport}/{date}")
 async def discover(provider:str,sport:str,date:str,x_sde_admin_token:str=Header(default="")):
@@ -535,5 +536,6 @@ async def dashboard():
 
 from laboratory import install
 install(globals())
+
 
 

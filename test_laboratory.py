@@ -41,6 +41,27 @@ class Invariants(unittest.TestCase):
         self.assertIsNone(match_candidate(e,m))
 
 class CollectorInvariants(unittest.IsolatedAsyncioTestCase):
+    async def test_bad_tennis_row_is_preserved_and_next_match_imported(self):
+        archived=[]; written=[]
+        class Response:
+            text='server1,server2,pbp,date,tournament,round\nA,B,SSRR;,2016-01-01,T,F\nC,D,SSSS,2016-01-01,T,F\n'
+            def raise_for_status(self): pass
+        class Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self,*a): pass
+            async def get(self,*a,**kw): return Response()
+        async def fake_get(*a,**kw): return []
+        async def fake_put(table,rows,*a,**kw): written.append((table,rows))
+        async def fake_archive(*a): archived.append(a)
+        async def fake_canonical(*a): return 'test-event'
+        async def fake_universe(*a): pass
+        with patch.object(laboratory.httpx,'AsyncClient',lambda **kw:Client(),create=True), patch.object(laboratory,'get',fake_get), patch.object(laboratory,'put',fake_put), patch.object(laboratory,'canonical',fake_canonical), patch.object(laboratory,'universe',fake_universe), patch.dict(laboratory.CTX,{'raw_ingest':fake_archive,'emit':lambda *a,**kw:None}):
+            self.assertEqual(await laboratory.tennis_points(),8)
+        self.assertEqual(len(archived),2)
+        self.assertEqual(archived[0][2]['row']['pbp'],'SSRR;')
+        checkpoints=[rows for table,rows in written if table=='backfill_checkpoints']
+        self.assertTrue(all(r['cursor_value']=='2' for r in checkpoints))
+
     async def test_pages_follow_all_small_batches(self):
         rows=list(range(251))
         async def fake_get(table,**q):

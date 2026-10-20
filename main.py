@@ -307,7 +307,7 @@ body{font-family:system-ui;background:#07101f;color:#e8eefc;margin:auto;max-widt
 <div class=card><h2>Ingestion jobs</h2><div class=scroll><table><thead><tr><th>Provider</th><th>Sport</th><th>Status</th><th>Progress</th><th>Result</th></tr></thead><tbody id=jobs></tbody></table></div></div>
 <div class=card><h2>Live collector feed</h2><pre id=feed>Waiting for collector events…</pre></div>
 <script>
-const esc=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const el=id=>document.getElementById(id);\nconst esc=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short=x=>x?String(x).slice(0,16)+'…':'—'; const n=x=>x==null?'—':x;
 async function refresh(){try{
  const [s,d,j]=await Promise.all([fetch('/status').then(x=>x.json()),fetch('/data/overview').then(x=>x.json()),fetch('/jobs').then(x=>x.json())]);

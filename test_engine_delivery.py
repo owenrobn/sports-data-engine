@@ -56,3 +56,12 @@ class ResultIntegrity(unittest.TestCase):
   p=[{'team':{'id':str(i),'displayName':n},'score':'1','winner':False} for i,n in enumerate(['Alpha','Beta'])]
   rows=scoreboard_records(e,'football',{'observed_at':T.isoformat(),'payload':{'competitors':p,'status':{'type':{'completed':True}}}})
   self.assertEqual([r['value']['result'] for r in rows if r['category']=='appearance'],['draw','draw'])
+
+class FailureIsolation(unittest.IsolatedAsyncioTestCase):
+ async def test_failed_summary_does_not_abort_other_matches(self):
+  from unittest.mock import AsyncMock,patch
+  import source_enrichment
+  events=[{'id':str(i),'starts_at':T.isoformat(),'metadata':{'source':'espn','league':'atp','provider_match_id':str(i),'provider_event_id':'parent'}} for i in range(2)]
+  async def get(table,**kwargs): return events if table=='events' else []
+  with patch('laboratory.get',get),patch('laboratory.sid_for',AsyncMock(return_value='sport')),patch('laboratory.tracked',AsyncMock(side_effect=[None,1])),patch('source_enrichment.asyncio.sleep',AsyncMock()):
+   self.assertEqual(await source_enrichment.collect('tennis'),1)

@@ -24,7 +24,7 @@ async def collect(sport):
                 phase='scheduled_pre_10m' if seconds is not None and 0<=seconds<=600 else 'early' if seconds is not None and seconds>600 else 'after_scheduled_start'
                 await put('event_snapshots',{'event_id':event['id'],'provider':'clob_capture','observed_at':after.isoformat(),'effective_at':None,'quality':None,'payload':{'market_id':link['market_id'],'tokens':tokens,'outcomes':outcomes,'mapping_observed_at':catalog[0]['observed_at'],'capture_started_at':before.isoformat(),'capture_finished_at':after.isoformat(),'phase':phase,'scheduled_start':event['starts_at'],'actual_kickoff_verified':False,'source_url':'https://clob.polymarket.com/book','orders_submitted':False}})
                 return len(tokens)
-            total+=await tracked('clob_capture_market',sport,capture)
+            total+=(await tracked('clob_capture_market',sport,capture)) or 0
         if total>=40: break
     return total
 

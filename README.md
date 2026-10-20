@@ -53,3 +53,5 @@ Current-match evidence: `/live/{event_id}` and `/data/live/{event_id}?as_of=...`
 - Existing optional sports feeds require `API_TENNIS_KEY` / `SPORTMONKS_API_TOKEN`. No subscriptions or paid infrastructure upgrades are purchased automatically.
 - Private account integration, independent fixture-source lineage, benchmark sharpness, complete lower-tier tennis schedules, actual-start/closing capture and settlement/fill reconciliation are **not complete**. They must not be reported as ready based on newly available receipts.
 - Current database usage exceeds the free allowance. Unique records are retained; capacity needs an approved infrastructure choice. Continuous collection also requires hosting that stays awake.
+
+Provider failures are isolated per match/competition; a partial failed scan does not erase successful receipts. Football draws are retained as draws. Latest eligible result corrections replace earlier observations in recent-form aggregation. Tennis enrichment uses the source tournament and competition IDs with the core competition resource; coverage is empirically monitored and not guaranteed.

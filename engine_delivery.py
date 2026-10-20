@@ -80,8 +80,10 @@ async def envelope(event_id,as_of=None):
     sport=live['sport'];cutoff=date(context['decision_cutoff'])
     links,books,odds,summaries,weather=await asyncio.gather(get('market_match_links',event_id='eq.'+str(event_id),created_at='lte.'+decision.isoformat(),limit=100),get('prediction_market_books',event_id='eq.'+str(event_id),observed_at='lte.'+decision.isoformat(),order='observed_at.desc',limit=500),get('odds_snapshots',event_id='eq.'+str(event_id),observed_at='lte.'+decision.isoformat(),order='observed_at.desc',limit=500),get('event_snapshots',event_id='eq.'+str(event_id),provider='eq.espn_summary',observed_at='lte.'+cutoff.isoformat(),order='observed_at.desc',limit=1),get('event_snapshots',event_id='eq.'+str(event_id),provider='eq.open_meteo',observed_at='lte.'+cutoff.isoformat(),order='observed_at.desc',limit=1))
     markets=[]
+    catalog_rows=await get('polymarket_market_catalog',market_id='in.('+','.join(l['market_id'] for l in links)+')',limit=100) if links else []
+    catalogs={r['market_id']:r for r in catalog_rows}
     for link in links:
-        catalog=await get('polymarket_market_catalog',market_id='eq.'+link['market_id'],limit=1)
+        catalog=[catalogs[link['market_id']]] if link['market_id'] in catalogs else []
         meta=(catalog[0].get('metadata') or {}) if catalog else {};tokens=meta.get('clobTokenIds') or [];outcomes=meta.get('outcomes') or []
         # Current catalog metadata is not historical proof of past token mapping.
         mapping_known=bool(catalog and date(catalog[0].get('observed_at')) and date(catalog[0]['observed_at'])<=decision)
@@ -108,7 +110,9 @@ async def operations():
     providers=[]
     for (sport,provider),r in latest.items():
         start=date(r.get('started_at'));age=(clock()-start).total_seconds() if start else None
-        providers.append({'sport':sport,'provider':provider,'status':r['status'],'records':r.get('records'),'age_seconds':round(age) if age is not None else None,'stalled':bool(r['status']=='running' and age is not None and age>660),'last_error':r.get('error'),'started_at':r.get('started_at'),'finished_at':r.get('finished_at')})
+        ttl=180 if provider in ('live_evidence','executable_books') else 1800 if provider in ('recent_evidence','physical_profiles','espn_summary','venue_weather') else 7200
+        stale=age is None or age>ttl
+        providers.append({'stale':stale,'expected_max_age_seconds':ttl,'sport':sport,'provider':provider,'status':r['status'],'records':r.get('records'),'age_seconds':round(age) if age is not None else None,'stalled':bool(r['status']=='running' and age is not None and age>660),'last_error':r.get('error'),'started_at':r.get('started_at'),'finished_at':r.get('finished_at')})
     from context_feed import provider_status
     return {'generated_at':clock().isoformat(),'providers':providers,'access':provider_status(),'blockers':['API Tennis and Sportmonks credentials are needed for their inactive feeds.','Independent fixture/benchmark feeds and private account access are not configured.','Continuous hosting and database capacity need an infrastructure plan; no paid upgrades were applied.'],'service_continuity':'Collectors run while the service is awake. Source errors and missing data are not successful coverage.'}
 
@@ -129,6 +133,6 @@ def install(ctx):
     @app.get('/operations',response_class=HTMLResponse)
     async def ops():
         p=await operations();body='<p><a href="/context">Match packages</a> · <a href="/rae">Full requirements</a> · <a href="/data/operations">Health JSON</a></p><p>'+esc(p['service_continuity'])+'</p>'
-        body+=table(['Sport','Collector','Last status','Records','Age (seconds)','Stalled','Error'],[[esc(r[k]) for k in ('sport','provider','status','records','age_seconds','stalled','last_error')] for r in p['providers']])
+        body+=table(['Sport','Collector','Last status','Records','Age (seconds)','Stale','Stalled','Error'],[[esc(r[k]) for k in ('sport','provider','status','records','age_seconds','stale','stalled','last_error')] for r in p['providers']])
         body+='<h2>Access and infrastructure blockers</h2><ul>'+''.join('<li>'+esc(x)+'</li>' for x in p['blockers'])+'</ul>'
         return page('SDE · Operations and remaining access',body)

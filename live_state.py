@@ -2,6 +2,7 @@
 import asyncio
 import json
 import uuid
+import httpx
 from datetime import timedelta
 from urllib.parse import urlencode
 from fastapi import HTTPException
@@ -24,10 +25,13 @@ async def collect(sport):
     mappings=await pages('provider_mappings',provider='eq.espn',entity_type='eq.event',order='id.asc')
     known={r['provider_entity_id']:r['canonical_id'] for r in mappings}
     leagues=['eng.1','esp.1','ger.1','ita.1','ned.1','fra.1','uefa.champions'] if sport=='football' else ['atp','wta']
-    total=0
+    total=0; failure=None
     for league in leagues:
         source=f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard'
-        payload=await get_json(source,{'dates':clock().strftime('%Y%m%d'),'limit':1000})
+        try: payload=await get_json(source,{'dates':clock().strftime('%Y%m%d'),'limit':1000})
+        except httpx.HTTPError as exc:
+            if failure is None: failure=exc
+            continue  # A failing competition does not starve the other competitions.
         rows=[]
         for event in payload.get('events') or []:
             for comp in competitions(event):
@@ -44,6 +48,7 @@ async def collect(sport):
                 rows.append({'event_id':known[pid],'provider':'espn','provider_event_id':uid('live:'+pid+':'+observed[:16]),'event_type':'live_snapshot','effective_at':None,'observed_at':observed,'payload':data})
         if rows: await put(sport+'_match_events',rows)
         total+=len(rows)
+    if failure is not None: raise failure
     return total
 
 def interpret(row,decision):

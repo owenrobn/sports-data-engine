@@ -19,15 +19,22 @@ async def collect(sport):
         if not league or not pid: continue
         path='soccer' if sport=='football' else 'tennis'
         base=f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/summary'
+        if sport=='tennis':
+            parent=meta.get('provider_event_id')
+            if not parent: continue
+            base=f'https://sports.core.api.espn.com/v2/sports/tennis/leagues/{league}/events/{parent}/competitions/{pid}'
         async def one():
-            raw=await get_json(base,{'event':pid})
+            raw=await get_json(base,{'event':pid} if sport=='football' else None)
+            if sport=='tennis':
+                comp={k:raw[k] for k in ('id','date','status','competitors','venue','surface','indoor','format','situation','type') if k in raw}
+                raw={'header':{'competitions':[comp]},'format':raw.get('format')}
             keys=('header','gameInfo','boxscore','rosters','injuries','standings','winprobability','format')
             payload={k:raw[k] for k in keys if k in raw}
             payload.update(source_url=base,provider_event_id=pid,source_updated_at=None,receipt_kind='public_provider_summary',independent_fixture_verification=False)
             if not any(k in raw for k in ('header','gameInfo','boxscore','rosters')): return 0
             await put('event_snapshots',{'event_id':e['id'],'provider':'espn_summary','observed_at':clock().isoformat(),'effective_at':None,'quality':None,'payload':payload})
             return 1
-        total+=await tracked('espn_summary_match',sport,one)
+        total+=(await tracked('espn_summary_match',sport,one)) or 0
         await asyncio.sleep(1)
     return total
 

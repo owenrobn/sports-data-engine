@@ -140,6 +140,8 @@ async def profiles(sport):
     fixtures=await all_rows(sport='eq.'+sport,category='eq.fixture',effective_at='gte.'+low,order='observed_at.desc,id.asc')
     recent=await all_rows(sport='eq.'+sport,category='eq.collection',metric='eq.profile_lookup',observed_at='gte.'+(clock()-timedelta(hours=6)).isoformat(),order='id.asc')
     attempted={r['entity_key'] for r in recent}; targets={}
+    now=clock()
+    fixtures.sort(key=lambda r:(0 if date(r['effective_at']) and now<=date(r['effective_at'])<=now+timedelta(days=2) else 1,abs((date(r['effective_at'])-now).total_seconds()) if date(r['effective_at']) else float('inf')))
     for f in fixtures: targets.setdefault(f['entity_key'],f)
     total=0
     for key,f in list((k,v) for k,v in targets.items() if k not in attempted)[:8]:
@@ -285,14 +287,30 @@ def install(ctx):
             if t is not None and (t.tzinfo is None or t>clock()): raise HTTPException(422,'Evidence timestamps must be timezone-aware and not in the future')
         row=record(r.sport,r.entity_key,r.entity_name,r.category,r.metric,r.value,r.provider,r.source_url,effective=r.effective_at.isoformat(),published=r.published_at.isoformat(),updated=r.source_updated_at.isoformat() if r.source_updated_at else None,event_id=str(r.event_id) if r.event_id else None,unit=r.unit,metadata={'ingestion':'authenticated_source_receipt'})
         await save([row]); return {'id':row['id'],'status':'stored','note':'Receipt retained with provenance; not independent validation of the assertion'}
+    @app.get('/context/players',response_class=HTMLResponse)
+    async def players(sport:str='tennis'):
+        from laboratory import page,table,esc
+        if sport not in ('football','tennis'): raise HTTPException(422,'Choose football or tennis')
+        rows=await all_rows(sport='eq.'+sport,category='eq.profile',order='observed_at.asc,id.asc')
+        people={}
+        for r in rows:
+            info=people.setdefault(r['entity_key'],{'name':r['entity_name'],'fields':{}})
+            info['fields'][r['metric']]=r
+        output=[]
+        for info in sorted(people.values(),key=lambda p:p['name']):
+            f=info['fields']; latest=max(f.values(),key=lambda r:r['observed_at'])
+            output.append([esc(info['name'])]+[esc((f.get(k) or {}).get('value')) for k in ('height_cm','weight_kg','handedness' if sport=='tennis' else 'preferred_foot','date_of_birth')]+[esc(latest['provider']),esc(latest['observed_at']),esc(latest.get('source_updated_at'))])
+        body='<p><a href="/context">Match packages</a> · <a href="?sport=football">Football profiles</a> · <a href="?sport=tennis">Tennis profiles</a></p><p>Latest collected profiles. Measurements are not live fitness assessments. Unknown source-update times remain unknown.</p>'
+        return page(sport.title()+' · Collected player profiles',body+table(['Player','Height (cm)','Weight (kg)','Hand / preferred foot','Birth date','Source','Retrieved','Source updated'],output))
     @app.get('/context',response_class=HTMLResponse)
     async def overview(sport:str='tennis'):
-        from laboratory import page,table,esc,sid_for
+        from laboratory import page,table,esc,sid_for,norm
         if sport not in ('football','tennis'): raise HTTPException(422,'Choose football or tennis')
         sid=await sid_for(sport)
         events=await CTX['db']('GET','events',query='?'+urlencode({'sport_id':'eq.'+sid,'starts_at':'gte.'+(clock()-timedelta(days=14)).isoformat(),'order':'starts_at.desc','limit':100})) or []
-        events=[e for e in events if (e.get('metadata') or {}).get('source')!='polymarket']
-        body='<p><a href="?sport=football">Football</a> · <a href="?sport=tennis">Tennis</a> · <a href="/context/providers">Source access</a></p><p>Recent form uses 7 and 14 days before the decision cutoff. Injuries require a recent confirmation. Missing information stays unknown. Past matches may lack archived pre-match observations.</p>'
+        events=[e for e in events if (e.get('metadata') or {}).get('source')!='polymarket' and not any(norm(n) in ('tbd','unknown','bye') for n in (e.get('metadata') or {}).get('participants',[])) and date(e.get('starts_at')) and date(e['starts_at'])<=clock()+timedelta(days=3)]
+        events.sort(key=lambda e:(0 if date(e['starts_at'])>=clock() else 1,abs((date(e['starts_at'])-clock()).total_seconds())))
+        body='<p><a href="?sport=football">Football</a> · <a href="?sport=tennis">Tennis</a> · <a href="/context/providers">Source access</a> · <a href="/context/players?sport='+sport+'">Collected player profiles</a></p><p>Recent form uses 7 and 14 days before the decision cutoff. Injuries require a recent confirmation. Missing information stays unknown. Past matches may lack archived pre-match observations.</p>'
         body+=table(['Match','Start','Evidence'],[[esc(e['name']),esc(e.get('starts_at')),f'<a href="/context/match/{e["id"]}">View input package</a>'] for e in events])
         return page('IMG-RAE / LEDGER · Recent evidence',body)
     @app.get('/context/match/{event_id}',response_class=HTMLResponse)

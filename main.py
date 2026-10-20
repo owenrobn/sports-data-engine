@@ -33,6 +33,24 @@ async def startup():
         asyncio.create_task(collection_loop())
         asyncio.create_task(historical_polymarket_loop())
 
+SPORT_TERMS={
+ "football":["soccer","football","premier league","champions league","la liga","serie a","bundesliga","ligue 1","mls","uefa","fifa"],
+ "tennis":["tennis","atp","wta","wimbledon","us open tennis","australian open tennis","french open tennis"],
+ "mma":["ufc","mma"],
+ "basketball":["nba","basketball","wnba","ncaa basketball"],
+ "baseball":["mlb","baseball"],
+ "hockey":["nhl","hockey"],
+ "cricket":["cricket"],
+ "rugby":["rugby"]
+}
+def classify_sport(item):
+    text=" ".join(str(item.get(k) or "") for k in ("title","question","slug","description")).lower()
+    tags=" ".join(str(t.get("label") or t.get("name") or t.get("slug") or "") for t in (item.get("tags") or []) if isinstance(t,dict)).lower()
+    hay=text+" "+tags
+    for sport,terms in SPORT_TERMS.items():
+        if any(term in hay for term in terms): return sport
+    return None
+
 async def historical_polymarket_loop():
     await asyncio.sleep(45)
     offset=0
@@ -41,20 +59,18 @@ async def historical_polymarket_loop():
             async with httpx.AsyncClient(timeout=45) as client:
                 response=await client.get("https://gamma-api.polymarket.com/events",params={"closed":"true","limit":50,"offset":offset,"order":"endDate","ascending":"false"})
                 response.raise_for_status(); batch=response.json()
-            sports=[]
+            grouped={}
             for item in batch:
-                blob=json.dumps(item).lower()
-                if any(k in blob for k in ("football","soccer","tennis","nfl","nba","mlb","nhl","ufc","mma","cricket","rugby")): sports.append(item)
-            if sports:
-                await raw_ingest("polymarket",f"historical:{offset}",{"events":sports,"source_count":len(batch)})
-                await normalize_polymarket(sports,"football")
-                emit("backfill","Historical Polymarket page processed",offset=offset,sports=len(sports))
+                sport=classify_sport(item)
+                if sport: grouped.setdefault(sport,[]).append(item)
+            for sport,items in grouped.items():
+                await raw_ingest("polymarket",f"historical:{sport}:{offset}",{"events":items,"source_count":len(batch)})
+                await normalize_polymarket(items,sport)
+            emit("backfill","Historical Polymarket page processed",offset=offset,sports={k:len(v) for k,v in grouped.items()})
             offset += 50
             if not batch: offset=0
-        except Exception as e:
-            emit("error","Historical Polymarket backfill page failed",offset=offset,error=str(e))
+        except Exception as e: emit("error","Historical Polymarket backfill page failed",offset=offset,error=str(e))
         await asyncio.sleep(20)
-
 
 async def collection_loop():
     await asyncio.sleep(15)

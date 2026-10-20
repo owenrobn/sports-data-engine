@@ -369,7 +369,7 @@ async def run_engine(ctx):
         await asyncio.sleep(900)
 
 STYLE='body{font-family:system-ui;max-width:1300px;margin:auto;padding:24px;background:#07101f;color:#e8eefc}a{color:#9dc8ff}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{text-align:left;border-bottom:1px solid #34445b;padding:10px;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere}section{border:1px solid #34445b;padding:16px;margin:16px 0;border-radius:10px}.scroll{overflow:auto}button,input{font:inherit}small{color:#bac6dc}svg{width:100%;height:200px}summary{cursor:pointer}'
-def page(title,body): return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>'+STYLE+'</style></head><body><nav><a href="/dashboard">Overview</a> · <a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health</a> · <a href="/rae">Full IMG-RAE requirements</a> · <a href="/context">Recent match evidence</a></nav><h1>'+esc(title)+'</h1>'+body+'</body></html>'
+def page(title,body): return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>'+STYLE+'</style></head><body><nav><a href="/dashboard">Overview</a> · <a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/operations">Operations</a> · <a href="/research/health">Provider health</a> · <a href="/rae">Full IMG-RAE requirements</a> · <a href="/context">Recent match evidence</a></nav><h1>'+esc(title)+'</h1>'+body+'</body></html>'
 def table(headers,rows): return '<div class="scroll"><table><thead><tr>'+''.join('<th scope="col">'+esc(h)+'</th>' for h in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+str(c)+'</td>' for c in r)+'</tr>' for r in rows)+'</tbody></table></div>'
 def percent(n,d): return f'{100*n/d:.1f}%' if d else 'Unknown (no declared universe)'
 async def coverage_html():
@@ -394,7 +394,7 @@ def install(ctx):
     async def dashboard():
         baseline=await original()
         try: extra=await coverage_html()
-        except Exception: extra='<section>Coverage temporarily unavailable. <a href="/research/health">Provider health</a></section>'
+        except Exception: extra='<section>Coverage temporarily unavailable. <a href="/operations">Operations</a> · <a href="/research/health">Provider health</a></section>'
         extra='<nav><a href="/rae">Full IMG-RAE requirements</a> · <a href="/context">Recent match evidence</a> · <a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health and errors</a></nav>'+extra
         return baseline.replace('<div class=grid id=metrics>',extra+'<div class=grid id=metrics>',1)
     for r in list(app.routes):

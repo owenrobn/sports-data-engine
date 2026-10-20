@@ -37,6 +37,7 @@ async def collect(sport):
                 state=(comp.get('status') or {}).get('type') or {}
                 start=date(comp.get('date') or event.get('date'))
                 now=clock()
+                if state.get('completed') is True: continue
                 if state.get('state')!='in' and not (start and now-timedelta(hours=6)<=start<=now+timedelta(minutes=30)): continue
                 observed=now.isoformat(); data=snapshot(comp,observed,source)
                 # Each minute has a receipt even if the score did not change: retrieval freshness is explicit.

@@ -102,6 +102,9 @@ def scoreboard_records(event,sport,observation):
         if not done: continue
         sets=p.get('linescores') or []
         value={'result':'win' if p.get('winner') is True else 'loss' if p.get('winner') is False else 'unknown','score':p.get('score'),'sets_played':len(sets) if sets else None,'minutes_played':None,'match_duration_minutes':None,'completed_observed_at':seen,'kind':'player' if sport=='tennis' else 'team'}
+        if sport=='football':
+            scores=[number(c.get('score')) for c in players]
+            if len(scores)==2 and all(v is not None for v in scores) and scores[0]==scores[1]: value['result']='draw'
         rows.append(record(**basis,category='appearance',metric='completed_match',value=value,metadata={'time_precision':'provider_scheduled_start','coverage':'selected ESPN competitions; not a complete player schedule'}))
         for stat in p.get('statistics') or []:
             metric=stat.get('name') or stat.get('label')
@@ -202,7 +205,8 @@ def participant_package(key,name,rows,cutoff,target_id,kind):
         t=date(r.get('effective_at'))
         if r['category']=='appearance' and r.get('event_id')!=target_id and t and cutoff-timedelta(days=14)<=t<cutoff:
             # One match per provider event, regardless of repeated final scoreboard observations.
-            appearances.setdefault(r.get('event_id') or r['id'],r)
+            matchkey=r.get('event_id') or r['id']
+            if matchkey not in appearances or r['observed_at']>appearances[matchkey]['observed_at']: appearances[matchkey]=r
     windows={}
     for days in (7,14):
         sample=[r for r in appearances.values() if date(r['effective_at'])>=cutoff-timedelta(days=days)]
@@ -257,7 +261,7 @@ async def package(event_id,as_of=None):
     return {'schema_version':'1.0','event_id':str(event_id),'match':event['name'],'match_start':start.isoformat(),'decision_cutoff':cutoff.isoformat(),'generated_at':clock().isoformat(),'windows_days':[7,14],'maximum_performance_lookback_days':14,'future_information_excluded':True,'historical_reconstruction_policy':'Evidence retrieved later is excluded unless an earlier archived observation exists. No backdating.','context_ready':not missing,'engine_ready':False,'rae_requirements':requirements,'missing_required_inputs':missing+['full_rae_requirements_not_yet_satisfied'],'participants':participants,'provider_access':provider_status(),'limitations':['Selected source coverage is not a complete player schedule.','No observation means unknown, never zero workload or injury-free.','This feed does not compute win probabilities or validate the PRD coefficients.']}
 
 def provider_status():
-    return {'espn_public':{'configured':True,'scope':'selected fixtures, results, profiles and rosters where public endpoints respond; no guaranteed SLA'},'thesportsdb':{'configured':True,'scope':'profile fallback; field and search coverage vary'},'api_tennis':{'configured':bool(os.getenv('API_TENNIS_KEY')),'scope':'recent tennis fixtures and match statistics'},'sportmonks':{'configured':bool(os.getenv('SPORTMONKS_API_TOKEN')),'scope':'football fixtures, player profiles, minutes and current absence reports'},'tracking_data':{'configured':False,'scope':'sprint speed and running distance require a licensed tracking feed'}}
+    return {'espn_public':{'configured':True,'scope':'selected fixtures, results, profiles and rosters where public endpoints respond; no guaranteed SLA'},'thesportsdb':{'configured':True,'scope':'profile fallback; field and search coverage vary'},'api_tennis':{'configured':bool(os.getenv('API_TENNIS_KEY')),'scope':'recent tennis fixtures and match statistics'},'sportmonks':{'configured':bool(os.getenv('SPORTMONKS_API_TOKEN')),'scope':'football fixtures, player profiles, minutes and current absence reports'},'bookmaker_odds':{'configured':bool(os.getenv('ODDS_API_KEY') and os.getenv('ODDS_API_SPORT_KEYS')),'scope':'explicitly configured sport keys; complete h2h decimal odds sets; quota-bounded polling'},'tracking_data':{'configured':False,'scope':'sprint speed and running distance require a licensed tracking feed'}}
 
 class Receipt(BaseModel):
     sport:str
@@ -315,7 +319,7 @@ def install(ctx):
         events=[e for e in events if (e.get('metadata') or {}).get('source')!='polymarket' and not any(norm(n) in ('tbd','unknown','bye') for n in (e.get('metadata') or {}).get('participants',[])) and date(e.get('starts_at')) and date(e['starts_at'])<=clock()+timedelta(days=3)]
         events.sort(key=lambda e:(0 if date(e['starts_at'])>=clock() else 1,abs((date(e['starts_at'])-clock()).total_seconds())))
         body='<p><a href="?sport=football">Football</a> · <a href="?sport=tennis">Tennis</a> · <a href="/context/providers">Source access</a> · <a href="/context/players?sport='+sport+'">Collected player profiles</a></p><p>Recent form uses 7 and 14 days before the decision cutoff. Injuries require a recent confirmation. Missing information stays unknown. Past matches may lack archived pre-match observations.</p>'
-        body+=table(['Match','Start','Evidence'],[[esc(e['name']),esc(e.get('starts_at')),f'<a href="/context/match/{e["id"]}">View input package</a> · <a href="/live/{e["id"]}">Current match state</a>'] for e in events])
+        body+=table(['Match','Start','Evidence'],[[esc(e['name']),esc(e.get('starts_at')),f'<a href="/context/match/{e["id"]}">View input package</a> · <a href="/live/{e["id"]}">Current match state</a> · <a href="/engine/{e["id"]}">Unified evidence</a>'] for e in events])
         return page('IMG-RAE / LEDGER · Recent evidence',body)
     @app.get('/context/match/{event_id}',response_class=HTMLResponse)
     async def view(event_id:uuid.UUID):

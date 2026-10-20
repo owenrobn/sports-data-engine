@@ -548,3 +548,12 @@ install_rae(globals())
 
 from live_state import install as install_live
 install_live(globals())
+
+from source_enrichment import install as install_sources
+install_sources(globals())
+from market_capture import install as install_captures
+install_captures(globals())
+from bookmaker_feed import install as install_bookmakers
+install_bookmakers(globals())
+from engine_delivery import install as install_delivery
+install_delivery(globals())

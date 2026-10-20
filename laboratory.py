@@ -84,7 +84,7 @@ async def canonical(provider,pid,sport,name,start,metadata,status='scheduled'):
 
 async def espn(sport):
     leagues=['eng.1','esp.1','ger.1','ita.1','fra.1','uefa.champions'] if sport=='football' else ['atp','wta']
-    path='soccer' if sport=='football' else 'tennis'; total=0
+    path='soccer' if sport=='football' else 'tennis'; total=0; seen=set()
     for days in (0,-1,-2,-3,-4,-5,-6,-7):
         date=(datetime.now(timezone.utc)+timedelta(days=days)).strftime('%Y%m%d')
         for league in leagues:
@@ -92,12 +92,17 @@ async def espn(sport):
             events=payload.get('events') or []; imported=0
             for event in events:
                 for comp in competitions(event):
+                    scheduled=comp.get('date') or event.get('date')
+                    if dt(scheduled) and dt(scheduled).strftime('%Y%m%d')!=date: continue
                     players=comp.get('competitors') or []
                     if len(players)!=2: continue
                     def label(p): return (p.get('team') or p.get('athlete') or {}).get('displayName') or p.get('displayName')
                     names=[label(p) for p in players]
-                    if not all(names): continue
-                    pid=str(comp.get('id') or event['id']); start=comp.get('date') or event.get('date')
+                    if not all(names) or any(norm(n) in ('tbd','unknown','bye') for n in names): continue
+                    pid=str(comp.get('id') or event['id']); start=scheduled
+                    if pid in seen: continue
+                    seen.add(pid)
+                    if comp.get('timeValid') is False or event.get('timeValid') is False: start=None
                     if dt(start) is None: start=None
                     competition=(payload.get('leagues') or [{}])[0].get('name') or league
                     state=comp.get('status') or event.get('status') or {}
@@ -105,7 +110,9 @@ async def espn(sport):
                     # A scoreboard is an observation, never a backdated point/event.
                     row={'event_id':eid,'provider':'espn','provider_event_id':uid(pid+':'+json.dumps({'status':state,'scores':[p.get('score') for p in players],'sets':[p.get('linescores') for p in players]},sort_keys=True)),'event_type':'score_observation','effective_at':None,'observed_at':stamp(),'payload':{'status':state,'competitors':players,'source_url':f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard'}}
                     if sport=='football':
-                        for k,p in zip(('home_score','away_score'),players):
+                        for p in players:
+                            if p.get('homeAway') not in ('home','away'): continue
+                            k=p['homeAway']+'_score'
                             try: row[k]=int(p.get('score'))
                             except (ValueError,TypeError): pass
                     await put(sport+'_match_events',row)
@@ -118,7 +125,7 @@ async def catalog(sport):
     total=0
     items=[]; catalog_rows=[]; snapshot_rows=[]; checkpoints=[]
     sid=await CTX['sport_id'](sport)
-    recent=await get('events',sport_id='eq.'+sid,starts_at='not.is.null',order='starts_at.desc',limit=10)
+    recent=await get('events',sport_id='eq.'+sid,starts_at='gte.'+(datetime.now(timezone.utc)-timedelta(days=7)).isoformat(),order='starts_at.asc',limit=20)
     queries=[('tennis' if sport=='tennis' else 'soccer')]+[e['name'] for e in recent if (e.get('metadata') or {}).get('source')=='espn']
     for query in queries:
         p=await fetch('https://gamma-api.polymarket.com/public-search',{'q':query,'limit_per_type':50,'events_status':'all'})
@@ -131,7 +138,10 @@ async def catalog(sport):
         # Existing table has provider/stream/cursor_key uniqueness checked before writes.
         checkpoints.append((cp,closed,offset+100 if batch else 0))
     for event in items:
-        if CTX['classify_sport'](event)!=sport: continue
+        if CTX['classify_sport'](event)!=sport:
+            title=' '+norm(event.get('title',''))+' '
+            exact=any(all(' '+norm(n)+' ' in title for n in (e.get('metadata') or {}).get('participants',[])) and len((e.get('metadata') or {}).get('participants',[]))==2 for e in recent)
+            if not exact: continue
         for m in event.get('markets') or []:
             mid=str(m.get('id') or '')
             if not mid: continue

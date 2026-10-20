@@ -320,4 +320,20 @@ async function refresh(){try{
 }catch(e){el('feed').textContent='Dashboard refresh error: '+e}}
 refresh();setInterval(refresh,5000);</script></body></html>"""
 @app.get("/dashboard",response_class=HTMLResponse)
-async def dashboard(): return DASH
+async def dashboard():
+    counts=(await get_status()).get("counts",{})
+    d=await data_overview()
+    def e(v):
+        import html
+        return html.escape(str(v if v is not None else "—"))
+    cards="".join('<div class="card"><div class="muted">'+e(k.replace("_"," "))+'</div><div class="metric">'+e(v)+'</div></div>' for k,v in counts.items())
+    erows="".join("<tr><td>"+e(x.get("name"))+"</td><td>"+e(x.get("status"))+"</td><td>"+e(x.get("starts_at"))+"</td><td>"+e((x.get("metadata") or {}).get("source"))+"</td></tr>" for x in d.get("events",[]))
+    mrows="".join("<tr><td>"+e(x.get("observed_at"))+"</td><td>"+e(str(x.get("market_id") or "")[:20])+"</td><td>"+e(x.get("outcome"))+"</td><td>"+e(x.get("price"))+"</td><td>"+e(x.get("volume"))+"</td><td>"+e(x.get("liquidity"))+"</td></tr>" for x in d.get("markets",[]))
+    brows="".join("<tr><td>"+e(x.get("observed_at"))+"</td><td>"+e(str(x.get("market_id") or "")[:20])+"</td><td>"+e(x.get("best_bid"))+"</td><td>"+e(x.get("best_ask"))+"</td><td>"+e(x.get("spread"))+"</td></tr>" for x in d.get("books",[]))
+    page=DASH[:DASH.find("<script>")]+"</body></html>"
+    page=page.replace('<div class=grid id=metrics></div>','<div class=grid id=metrics>'+cards+'</div>')
+    page=page.replace('<tbody id=events></tbody>','<tbody id=events>'+erows+'</tbody>')
+    page=page.replace('<tbody id=markets></tbody>','<tbody id=markets>'+mrows+'</tbody>')
+    page=page.replace('<tbody id=books></tbody>','<tbody id=books>'+brows+'</tbody>')
+    page=page.replace('<div class=card><h2>Live collector feed</h2><pre id=feed>Waiting for collector events…</pre></div>','')
+    return page

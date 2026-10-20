@@ -66,7 +66,9 @@ async def tracked(provider,sport,fn):
         msg=type(ex).__name__
         if isinstance(ex,httpx.HTTPStatusError):
             msg+=' HTTP '+str(ex.response.status_code)
-            try: msg+=' '+str(ex.response.json().get('code',''))
+            try:
+                detail=ex.response.json(); msg+=' '+str(detail.get('code',''))
+                if detail.get('code') in ('21000','57014','42P01','42501','23505'): msg+=' '+str(detail.get('message',''))[:180]
             except (ValueError,AttributeError): pass
         await db('PATCH','sde_provider_runs',{'status':'failed','finished_at':stamp(),'error':msg},'?id=eq.'+rid)
         CTX['emit']('error','Collector failed',provider=provider,sport=sport,error=msg)
@@ -265,11 +267,13 @@ async def run_engine(ctx):
     CTX.update(ctx)
     async def repair():
         for table in ('prediction_market_snapshots','prediction_market_trades','prediction_market_books','event_market_timeline'):
-            while await db('POST','rpc/sde_repair_batch',{'t':table}):
+            while (await db('POST','rpc/sde_repair_tick',{'t':table})).get('processed',0):
                 await asyncio.sleep(.05)
     asyncio.create_task(tracked('identity_repair','all',repair))
     async def archives():
-        await asyncio.gather(tracked('statsbomb','football',ctx['ingest_statsbomb_open']),tracked('tennisvisuals_v2','tennis',tennis_points))
+        while True:
+            await asyncio.gather(tracked('statsbomb','football',ctx['ingest_statsbomb_open']),tracked('tennisvisuals_v2','tennis',tennis_points))
+            await asyncio.sleep(900)
     asyncio.create_task(archives())
     while True:
         # Separate lanes give both sports equal time even when one provider is slow.

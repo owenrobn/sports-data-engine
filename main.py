@@ -33,6 +33,8 @@ async def startup():
         asyncio.create_task(collection_loop())
         asyncio.create_task(historical_polymarket_loop())
         asyncio.create_task(ingest_statsbomb_open())
+        asyncio.create_task(ingest_tennis_archive())
+        asyncio.create_task(build_event_market_timeline())
 
 SPORT_TERMS={
  "football":["soccer","football","premier league","champions league","la liga","serie a","bundesliga","ligue 1","mls","uefa","fifa"],
@@ -220,6 +222,57 @@ async def ingest_statsbomb_open():
                     for i in range(0,len(rows),200): await db("POST","football_match_events",rows[i:i+200])
                 except Exception as ex: emit("warning","StatsBomb event ingest failed",match=pid,error=str(ex))
             emit("backfill","StatsBomb competition imported",competition=comp.get("competition_name"),season=comp.get("season_name"))
+
+async def ingest_tennis_archive():
+    sid=await sport_id("tennis")
+    years=[2026,2025,2024]
+    tours=["atp","wta"]
+    async with httpx.AsyncClient(timeout=60,follow_redirects=True) as client:
+        for tour in tours:
+            for year in years:
+                urls=[
+                    f"https://raw.githubusercontent.com/JeffSackmann/tennis_{tour}/master/{tour}_matches_{year}.csv",
+                    f"https://raw.githubusercontent.com/JeffSackmann/tennis_{tour}/master/{tour}_matches_qual_chall_{year}.csv"
+                ]
+                for url in urls:
+                    try:
+                        response=await client.get(url)
+                        if response.status_code!=200: continue
+                        import csv,io
+                        rows=list(csv.DictReader(io.StringIO(response.text)))
+                        await raw_ingest("tennis_archive",f"{tour}:{year}:{url.split('/')[-1]}",{"url":url,"rows":len(rows),"license_note":"provider/archive terms apply"})
+                        for m in rows[:3000]:
+                            p1=m.get("winner_name"); p2=m.get("loser_name")
+                            if not p1 or not p2: continue
+                            date=m.get("tourney_date") or ""
+                            starts_at=None
+                            if len(date)==8: starts_at=f"{date[:4]}-{date[4:6]}-{date[6:8]}T00:00:00+00:00"
+                            pid=f'{tour}:{m.get("tourney_id")}:{m.get("match_num")}:{p1}:{p2}'
+                            mapping=await db("GET","provider_mappings",query=f"?provider=eq.tennis_archive&entity_type=eq.event&provider_entity_id=eq.{pid}&select=canonical_id&limit=1")
+                            if mapping: continue
+                            created=await db("POST","events",{"sport_id":sid,"name":f"{p1} vs {p2}","starts_at":starts_at,"status":"historical","metadata":{"source":"tennis_archive","tour":tour,"tournament":m.get("tourney_name"),"surface":m.get("surface"),"round":m.get("round"),"score":m.get("score"),"winner":p1,"loser":p2,"winner_rank":m.get("winner_rank"),"loser_rank":m.get("loser_rank"),"best_of":m.get("best_of")}})
+                            if not created: continue
+                            eid=created[0]["id"]
+                            await db("POST","provider_mappings",{"provider":"tennis_archive","entity_type":"event","provider_entity_id":pid,"canonical_id":eid})
+                            await db("POST","tennis_match_events",{"event_id":eid,"provider":"tennis_archive","provider_event_id":pid,"event_type":"match_result","surface":m.get("surface"),"effective_at":starts_at,"payload":{"score":m.get("score"),"winner":p1,"loser":p2,"w_ace":m.get("w_ace"),"l_ace":m.get("l_ace"),"w_df":m.get("w_df"),"l_df":m.get("l_df"),"w_bpSaved":m.get("w_bpSaved"),"w_bpFaced":m.get("w_bpFaced"),"l_bpSaved":m.get("l_bpSaved"),"l_bpFaced":m.get("l_bpFaced")}})
+                        emit("backfill","Tennis archive imported",tour=tour,year=year,rows=len(rows))
+                    except Exception as ex: emit("warning","Tennis archive import failed",tour=tour,year=year,error=str(ex))
+                    await asyncio.sleep(2)
+
+async def build_event_market_timeline():
+    while True:
+        try:
+            links=await db("GET","market_match_links",query="?select=event_id,market_id,condition_id&limit=500") or []
+            for link in links:
+                eid=link["event_id"]; mid=link["market_id"]
+                prices=await db("GET","prediction_market_snapshots",query=f"?event_id=eq.{eid}&market_id=eq.{mid}&select=market_id,condition_id,token_id,outcome,price,best_bid,best_ask,observed_at,effective_at&order=observed_at.asc&limit=5000") or []
+                for p in prices:
+                    ts=p.get("effective_at") or p.get("observed_at")
+                    row={"event_id":eid,"sport":"unknown","effective_at":ts,"state":{},"market_id":mid,"condition_id":p.get("condition_id"),"token_id":p.get("token_id"),"outcome":p.get("outcome"),"market_price":p.get("price"),"best_bid":p.get("best_bid"),"best_ask":p.get("best_ask"),"source":"polymarket"}
+                    await db("POST","event_market_timeline",row)
+            emit("timeline","Event-market timeline pass complete",links=len(links))
+        except Exception as ex: emit("error","Timeline join failed",error=str(ex))
+        await asyncio.sleep(1800)
 
 async def bootstrap_collectors():
     await asyncio.sleep(3)

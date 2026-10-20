@@ -303,4 +303,6 @@ async function refresh(){try{
  jobs.innerHTML=(j||[]).slice(0,30).map(x=>'<tr><td>'+esc(x.provider)+'</td><td>'+esc(x.sport)+'</td><td>'+esc(x.status)+'</td><td>'+esc(x.progress)+'%</td><td>'+esc(JSON.stringify(x.result||{}))+'</td></tr>').join('');
 }catch(e){feed.textContent='Dashboard refresh error: '+e}}
 refresh();setInterval(refresh,5000);let es=new EventSource('/progress/stream');es.onmessage=e=>{feed.textContent=e.data+'\n'+feed.textContent.slice(0,12000)}
-</script></body></html>"""\n@app.get("/dashboard",response_class=HTMLResponse)\nasync def dashboard(): return DASH\n
+</script></body></html>"""
+@app.get("/dashboard",response_class=HTMLResponse)
+async def dashboard(): return DASH

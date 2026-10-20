@@ -80,6 +80,8 @@ async def tracked(provider,sport,fn):
         msg=type(ex).__name__
         if isinstance(ex,httpx.HTTPStatusError):
             msg+=' HTTP '+str(ex.response.status_code)
+            # Host only distinguishes database failures from public-source denial; omit credentials and URLs.
+            msg+=' host='+ex.request.url.host
             try:
                 detail=ex.response.json(); msg+=' '+str(detail.get('code',''))
                 if detail.get('code') in ('21000','57014','42P01','42501','23505','53100'): msg+=' '+str(detail.get('message',''))[:180]
@@ -106,7 +108,7 @@ async def canonical(provider,pid,sport,name,start,metadata,status='scheduled'):
 
 async def espn(sport):
     leagues=['eng.1','esp.1','ger.1','ita.1','ned.1','fra.1','uefa.champions'] if sport=='football' else ['atp','wta']
-    path='soccer' if sport=='football' else 'tennis'; total=0; seen=set()
+    path='soccer' if sport=='football' else 'tennis'; total=0; seen=set(); failure=None
     sid=await sid_for(sport)
     known=await pages('provider_mappings',provider='eq.espn',entity_type='eq.event',order='id.asc')
     known={m['provider_entity_id']:m['canonical_id'] for m in known}
@@ -120,7 +122,12 @@ async def espn(sport):
     if policy()['historical_fixture_expansion_enabled']: dates+=history[offset:offset+2]
     for date in dates:
         for league in leagues:
-            payload=await fetch(f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard',{'dates':date,'limit':1000})
+            try:
+                payload=await fetch(f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard',{'dates':date,'limit':1000})
+            except httpx.HTTPError as ex:
+                if failure is None: failure=ex
+                CTX['emit']('warning','Scoreboard unavailable; other competitions continue',sport=sport,league=league,date=date)
+                continue
             events=payload.get('events') or []; imported=0; event_rows=[]; mapping_rows=[]; state_rows=[]; expected=0
             for event in events:
                 for comp in competitions(event):
@@ -159,6 +166,7 @@ async def espn(sport):
                 await put(sport+'_match_events',state_rows[j:j+100])
             await universe('espn',sport,league+':'+date,expected,imported,'ESPN '+league+' named matches on '+date+'; excludes unlisted matches and unresolved brackets')
     await put('backfill_checkpoints',{'provider':'espn','stream':sport,'cursor_key':'catalog_dates','cursor_value':str(offset+2),'status':'running','updated_at':stamp()},'provider,stream,cursor_key',True)
+    if failure is not None: raise failure
     return total
 
 def closed_price_fingerprint(market):
@@ -245,18 +253,30 @@ async def link(sport):
     sid=await sid_for(sport)
     events=await pages('events',select='id,name,starts_at,metadata',sport_id='eq.'+sid,order='id.asc')
     markets=await pages('polymarket_market_catalog',select='market_id,polymarket_event_id,condition_id,question,start_time,metadata->event_title,metadata->market_type',sport='eq.'+sport,order='market_id.asc')
-    total=0
-    for m in markets: m['metadata']={'event_title':m.get('event_title'),'market_type':m.get('market_type')}
+    total=0; candidates=[]; accepted_links=[]
+    by_token={}
+    for i,m in enumerate(markets):
+        m['metadata']={'event_title':m.get('event_title'),'market_type':m.get('market_type')}
+        for token in set(norm(m.get('event_title') or m.get('question') or '').split()):
+            by_token.setdefault(token,set()).add(i)
     for e in events:
         if (e.get('metadata') or {}).get('source')=='polymarket': continue
-        for m in markets:
+        names=(e.get('metadata') or {}).get('participants') or re.split(r'\s+(?:vs\.?|v)\s+',e.get('name',''),flags=re.I)
+        if len(names)!=2: continue
+        tokens=set(' '.join(norm(n) for n in names).split())-{'fc','cf','afc','club'}
+        if not tokens: continue
+        possible=set.intersection(*(by_token.get(t,set()) for t in tokens))
+        for i in sorted(possible):
+            m=markets[i]
             candidate=match_candidate(e,m)
             if candidate is None: continue
             accepted=candidate['accepted']; confidence=1 if accepted else .5
-            await put('market_link_candidates',{'event_id':e['id'],'market_id':m['market_id'],'polymarket_event_id':m['polymarket_event_id'],'candidate_title':m['question'],'sport':sport,'event_start':e.get('starts_at'),'market_start':m.get('start_time'),'time_distance_minutes':candidate['distance'],'name_similarity':1,'confidence':confidence,'status':'accepted' if accepted else 'candidate','metadata':candidate},'event_id,market_id',True)
+            candidates.append({'event_id':e['id'],'market_id':m['market_id'],'polymarket_event_id':m['polymarket_event_id'],'candidate_title':m['question'],'sport':sport,'event_start':e.get('starts_at'),'market_start':m.get('start_time'),'time_distance_minutes':candidate['distance'],'name_similarity':1,'confidence':confidence,'status':'accepted' if accepted else 'candidate','metadata':candidate})
             if accepted:
-                await put('market_match_links',{'event_id':e['id'],'market_id':m['market_id'],'condition_id':m.get('condition_id'),'market_question':m['question'],'market_type':(m.get('metadata') or {}).get('market_type'),'confidence':1,'method':'exact_pair_time_v2','metadata':{'sport':sport,**candidate}},'event_id,market_id',True)
+                accepted_links.append({'event_id':e['id'],'market_id':m['market_id'],'condition_id':m.get('condition_id'),'market_question':m['question'],'market_type':(m.get('metadata') or {}).get('market_type'),'confidence':1,'method':'exact_pair_time_v2','metadata':{'sport':sport,**candidate}})
                 total+=1
+    for j in range(0,len(candidates),100): await put('market_link_candidates',candidates[j:j+100],'event_id,market_id',True)
+    for j in range(0,len(accepted_links),100): await put('market_match_links',accepted_links[j:j+100],'event_id,market_id',True)
     return total
 
 async def market_history(sport):
@@ -375,16 +395,16 @@ async def run_engine(ctx):
     async def repair():
         total=0
         for table in ('prediction_market_snapshots','prediction_market_trades','prediction_market_books','event_market_timeline'):
-            for _ in range(10):
+            for _ in range(100):
                 n=(await db('POST','rpc/sde_repair_tick',{'t':table})).get('processed',0)
                 if not n: break
                 total+=n
-                await asyncio.sleep(.05)
+                await asyncio.sleep(.5)
         return total
     async def repair_loop():
         while True:
-            await tracked('identity_repair','all',repair)
-            await asyncio.sleep(900)
+            n=await tracked('identity_repair','all',repair)
+            await asyncio.sleep(60 if n else 900)
     BACKGROUND.append(asyncio.create_task(repair_loop()))
     async def archives():
         while True:
@@ -488,5 +508,7 @@ def install(ctx):
         data=json.dumps(timeline_rows).replace('<','\\u003c')
         body+='<script type="application/json" id="replay-data">'+data+'</script><script>const rows=JSON.parse(document.getElementById("replay-data").textContent);document.getElementById("replay").addEventListener("input",e=>{document.getElementById("replay-state").textContent=JSON.stringify(rows[Number(e.target.value)]||{},null,2)});</script>'
         return page(event['name'],body)
+
+
 
 

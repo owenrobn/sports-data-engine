@@ -8,6 +8,7 @@ except ImportError:
     sys.modules['fastapi.responses']=types.SimpleNamespace(HTMLResponse=str)
     sys.modules['httpx']=types.SimpleNamespace(HTTPStatusError=type('HTTPStatusError',(Exception,),{}))
 import laboratory
+from unittest.mock import AsyncMock
 from laboratory import match_candidate,parse_points,page
 
 class Invariants(unittest.TestCase):
@@ -34,6 +35,20 @@ class Invariants(unittest.TestCase):
         with self.assertRaises(ValueError): parse_points('SSXS','A','B')
     def test_html_escape(self):
         self.assertNotIn('<h1><script>',page('<script>',''))
+
+class LinkingWrites(unittest.IsolatedAsyncioTestCase):
+    async def test_batches_keep_conservative_pair_time_rule(self):
+        event={'id':'e','name':'Club A vs Club B','starts_at':'2026-10-20T12:00:00Z','metadata':{}}
+        markets=[{'market_id':str(i),'polymarket_event_id':'p','condition_id':'c','question':'Club A vs Club B','event_title':'Club A vs Club B','market_type':'moneyline','start_time':'2026-10-20T12:00:00Z'} for i in range(201)]
+        markets.append({**markets[0],'market_id':'wrong-date','start_time':'2026-10-10T12:00:00Z'})
+        writer=AsyncMock()
+        with patch.object(laboratory,'sid_for',AsyncMock(return_value='s')),patch.object(laboratory,'pages',AsyncMock(side_effect=[[event],markets])),patch.object(laboratory,'put',writer):
+            self.assertEqual(await laboratory.link('football'),201)
+        batches=[call.args for call in writer.call_args_list]
+        self.assertTrue(all(len(args[1])<=100 for args in batches))
+        accepted=[row for args in batches if args[0]=='market_match_links' for row in args[1]]
+        self.assertEqual(len(accepted),201)
+        self.assertNotIn('wrong-date',[row['market_id'] for row in accepted])
 
     def test_placeholder_never_links(self):
         e={'name':'TBD vs TBD','starts_at':'2026-10-20T10:00:00Z'}
@@ -76,5 +91,7 @@ class CollectorInvariants(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await laboratory.tracked('espn','tennis',work))
 
 if __name__=='__main__': unittest.main()
+
+
 
 

@@ -109,6 +109,7 @@ async def normalize_polymarket(items,sport):
         markets=item.get("markets") or []
         for m in markets:
             mid=str(m.get("id") or m.get("conditionId") or "")
+            await db("POST","polymarket_market_catalog",{"market_id":mid or pid,"polymarket_event_id":pid,"condition_id":m.get("conditionId"),"question":m.get("question") or name,"slug":m.get("slug"),"sport":sport,"start_time":m.get("startDate") or item.get("startDate"),"end_time":m.get("endDate") or item.get("endDate"),"closed":bool(m.get("closed")),"resolved":bool(m.get("resolved")),"metadata":{"event_title":name,"event_slug":item.get("slug"),"outcomes":m.get("outcomes"),"clobTokenIds":m.get("clobTokenIds")}},prefer="resolution=merge-duplicates")
             outcomes=m.get("outcomes") or []
             prices=m.get("outcomePrices") or []
             if isinstance(outcomes,str):
@@ -331,11 +332,8 @@ async def link_sports_markets():
             sports=await db("GET","sports",query="?select=id,slug") or []
             smap={x["id"]:x["slug"] for x in sports}
             events=await db("GET","events",query="?select=id,sport_id,name,starts_at,metadata&order=updated_at.desc&limit=500") or []
-            snaps=await db("GET","prediction_market_snapshots",query="?select=event_id,market_id,condition_id,payload,observed_at&order=id.desc&limit=3000") or []
-            markets={}
-            for s in snaps:
-                title=(s.get("payload") or {}).get("question") or (s.get("payload") or {}).get("market") or ""
-                markets.setdefault(s["market_id"],{"market_id":s["market_id"],"condition_id":s.get("condition_id"),"title":title,"pm_event_id":s.get("event_id")})
+            catalog=await db("GET","polymarket_market_catalog",query="?select=market_id,polymarket_event_id,condition_id,question,sport,start_time&order=observed_at.desc&limit=3000") or []
+            markets={x["market_id"]:{"market_id":x["market_id"],"condition_id":x.get("condition_id"),"title":x.get("question") or "","pm_event_id":x.get("polymarket_event_id"),"sport":x.get("sport"),"start_time":x.get("start_time")} for x in catalog}
             for ev in events:
                 sport=smap.get(ev.get("sport_id"))
                 if sport not in ("football","tennis"): continue
@@ -343,6 +341,7 @@ async def link_sports_markets():
                 if len(et)<2: continue
                 best=None
                 for m in markets.values():
+                    if m.get("sport") and m.get("sport")!=sport: continue
                     mt=name_tokens(m["title"]); inter=len(et & mt); union=len(et | mt) or 1
                     sim=inter/union
                     if inter>=2 and (best is None or sim>best[0]): best=(sim,m)

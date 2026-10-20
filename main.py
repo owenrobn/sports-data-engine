@@ -31,7 +31,7 @@ async def startup():
     if SUPABASE_KEY:
         asyncio.create_task(bootstrap_collectors())
         asyncio.create_task(collection_loop())
-        asyncio.create_task(historical_polymarket_loop())
+        asyncio.create_task(historical_polymarket_loop())\n        asyncio.create_task(ingest_statsbomb_open())
 
 SPORT_TERMS={
  "football":["soccer","football","premier league","champions league","la liga","serie a","bundesliga","ligue 1","mls","uefa","fifa"],
@@ -133,7 +133,7 @@ async def polymarket_price_history(token_id,event_id,market_id,start_ts=None,end
     rows=[]
     for point in history:
         if point.get("t") is None or point.get("p") is None: continue
-        rows.append({"event_id":event_id,"venue":"polymarket","market_id":market_id,"outcome":token_id,"price":point["p"],"observed_at":datetime.fromtimestamp(int(point["t"]),timezone.utc).isoformat(),"payload":{"stream":"clob_price_history","token_id":token_id}})
+        rows.append({"event_id":event_id,"venue":"polymarket","market_id":market_id,"outcome":token_id,"token_id":token_id,"price":point["p"],"observed_at":datetime.fromtimestamp(int(point["t"]),timezone.utc).isoformat(),"effective_at":datetime.fromtimestamp(int(point["t"]),timezone.utc).isoformat(),"payload":{"stream":"clob_price_history","token_id":token_id}})
     for i in range(0,len(rows),250):
         await db("POST","prediction_market_snapshots",rows[i:i+250])
     return len(rows)
@@ -188,6 +188,37 @@ async def backfill_polymarket_event(item,event_id):
             try: books+=await polymarket_book_snapshot(str(token),event_id,market_id)
             except Exception as e: emit("warning","CLOB book unavailable",market_id=market_id,error=str(e))
     return total,books,trades
+
+async def ingest_statsbomb_open():
+    base="https://raw.githubusercontent.com/statsbomb/open-data/master/data"
+    async with httpx.AsyncClient(timeout=60) as client:
+        comps=(await client.get(base+"/competitions.json")).json()
+        picked=[x for x in comps if x.get("competition_gender")=="male"][:8]
+        for comp in picked:
+            try:
+                matches=(await client.get(base+f'/matches/{comp["competition_id"]}/{comp["season_id"]}.json')).json()
+            except: continue
+            for match in matches[:50]:
+                name=f'{match.get("home_team",{}).get("home_team_name")} vs {match.get("away_team",{}).get("away_team_name")}'
+                start=f'{match.get("match_date")}T{match.get("kick_off") or "00:00:00"}'
+                sid=await sport_id("football"); pid=str(match.get("match_id"))
+                mapping=await db("GET","provider_mappings",query=f"?provider=eq.statsbomb&entity_type=eq.event&provider_entity_id=eq.{pid}&select=canonical_id&limit=1")
+                if mapping: eid=mapping[0]["canonical_id"]
+                else:
+                    created=await db("POST","events",{"sport_id":sid,"name":name,"starts_at":start,"status":match.get("match_status") or "historical","metadata":{"source":"statsbomb","competition":comp.get("competition_name"),"season":comp.get("season_name"),"home_score":match.get("home_score"),"away_score":match.get("away_score")}})
+                    if not created: continue
+                    eid=created[0]["id"]; await db("POST","provider_mappings",{"provider":"statsbomb","entity_type":"event","provider_entity_id":pid,"canonical_id":eid})
+                try:
+                    evs=(await client.get(base+f'/events/{pid}.json')).json()
+                    rows=[]
+                    for x in evs:
+                        typ=(x.get("type") or {}).get("name")
+                        if typ not in ("Shot","Own Goal Against","Own Goal For","Yellow Card","Red Card","Substitution"): continue
+                        minute=x.get("minute"); second=x.get("second"); period=x.get("period")
+                        rows.append({"event_id":eid,"provider":"statsbomb","provider_event_id":str(x.get("id")),"event_type":typ,"period":period,"minute":minute,"second":second,"team_name":(x.get("team") or {}).get("name"),"player_name":(x.get("player") or {}).get("name"),"xg":(x.get("shot") or {}).get("statsbomb_xg"),"payload":x})
+                    for i in range(0,len(rows),200): await db("POST","football_match_events",rows[i:i+200])
+                except Exception as ex: emit("warning","StatsBomb event ingest failed",match=pid,error=str(ex))
+            emit("backfill","StatsBomb competition imported",competition=comp.get("competition_name"),season=comp.get("season_name"))
 
 async def bootstrap_collectors():
     await asyncio.sleep(3)

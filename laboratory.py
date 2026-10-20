@@ -22,6 +22,15 @@ def arr(v):
     except (ValueError,TypeError): return []
 def esc(v): return html.escape(str(v if v is not None else 'Unknown'))
 def norm(v): return ' '.join(re.findall(r'[a-z0-9]+',str(v).lower()))
+def competitions(event):
+    result=[]
+    def walk(node):
+        if isinstance(node,dict):
+            if len(node.get('competitors') or [])==2: result.append(node); return
+            for key in ('groupings','competitions','events'):
+                for child in node.get(key) or []: walk(child)
+    walk(event)
+    return result
 def dt(v):
     try: return datetime.fromisoformat(v.replace('Z','+00:00')).astimezone(timezone.utc)
     except (ValueError,TypeError,AttributeError): return None
@@ -55,7 +64,10 @@ async def tracked(provider,sport,fn):
     except Exception as ex:
         # Persist only error classes/status, never request URLs, headers or keys.
         msg=type(ex).__name__
-        if isinstance(ex,httpx.HTTPStatusError): msg+=' HTTP '+str(ex.response.status_code)
+        if isinstance(ex,httpx.HTTPStatusError):
+            msg+=' HTTP '+str(ex.response.status_code)
+            try: msg+=' '+str(ex.response.json().get('code',''))
+            except (ValueError,AttributeError): pass
         await db('PATCH','sde_provider_runs',{'status':'failed','finished_at':stamp(),'error':msg},'?id=eq.'+rid)
         CTX['emit']('error','Collector failed',provider=provider,sport=sport,error=msg)
 async def universe(provider,sport,key,expected,imported,description):
@@ -71,13 +83,13 @@ async def canonical(provider,pid,sport,name,start,metadata,status='scheduled'):
 async def espn(sport):
     leagues=['eng.1','esp.1','ger.1','ita.1','fra.1','uefa.champions'] if sport=='football' else ['atp','wta']
     path='soccer' if sport=='football' else 'tennis'; total=0
-    for days in (0,-1,-2):
+    for days in (0,-1,-2,-3,-4,-5,-6,-7):
         date=(datetime.now(timezone.utc)+timedelta(days=days)).strftime('%Y%m%d')
         for league in leagues:
             payload=await fetch(f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard',{'dates':date,'limit':1000})
             events=payload.get('events') or []; imported=0
             for event in events:
-                for comp in event.get('competitions') or []:
+                for comp in competitions(event):
                     players=comp.get('competitors') or []
                     if len(players)!=2: continue
                     def label(p): return (p.get('team') or p.get('athlete') or {}).get('displayName') or p.get('displayName')
@@ -96,14 +108,17 @@ async def espn(sport):
                             except (ValueError,TypeError): pass
                     await put(sport+'_match_events',row)
                     imported+=1; total+=1
-            await universe('espn',sport,league+':'+date,len([c for e in events for c in e.get('competitions',[]) if len(c.get('competitors',[]))==2]),imported,'ESPN '+league+' scoreboard '+date+'; excludes unlisted matches')
+            await universe('espn',sport,league+':'+date,sum(len(competitions(e)) for e in events),imported,'ESPN '+league+' scoreboard '+date+'; excludes unlisted matches')
     return total
 
 async def catalog(sport):
     # Search pages supplement paginated active/closed feeds; both sports receive the same budget.
     total=0
-    items=[]
-    for query in (('tennis' if sport=='tennis' else 'soccer'),):
+    items=[]; catalog_rows=[]; snapshot_rows=[]; checkpoints=[]
+    sid=await CTX['sport_id'](sport)
+    recent=await get('events',sport_id='eq.'+sid,starts_at='not.is.null',order='starts_at.desc',limit=10)
+    queries=[('tennis' if sport=='tennis' else 'soccer')]+[e['name'] for e in recent if (e.get('metadata') or {}).get('source')=='espn']
+    for query in queries:
         p=await fetch('https://gamma-api.polymarket.com/public-search',{'q':query,'limit_per_type':50,'events_status':'all'})
         items.extend(p.get('events',[]))
     for closed in ('false','true'):
@@ -112,8 +127,7 @@ async def catalog(sport):
         batch=await fetch('https://gamma-api.polymarket.com/events',{'closed':closed,'limit':100,'offset':offset,'order':'id','ascending':'false'})
         items.extend(batch)
         # Existing table has provider/stream/cursor_key uniqueness checked before writes.
-        if cp: await db('PATCH','backfill_checkpoints',{'cursor_value':str(offset+100 if batch else 0),'updated_at':stamp()},'?id=eq.'+str(cp[0]['id']))
-        else: await put('backfill_checkpoints',{'provider':'polymarket','stream':sport,'cursor_key':closed,'cursor_value':'100','status':'running'})
+        checkpoints.append((cp,closed,offset+100 if batch else 0))
     for event in items:
         if CTX['classify_sport'](event)!=sport: continue
         for m in event.get('markets') or []:
@@ -121,11 +135,18 @@ async def catalog(sport):
             if not mid: continue
             tokens=arr(m.get('clobTokenIds')); outcomes=arr(m.get('outcomes'))
             start=m.get('gameStartTime') or event.get('startTime')
-            await put('polymarket_market_catalog',{'market_id':mid,'polymarket_event_id':str(event['id']),'condition_id':m.get('conditionId'),'question':m.get('question'),'slug':m.get('slug'),'sport':sport,'start_time':start,'end_time':m.get('endDate'),'closed':bool(m.get('closed')),'resolved':bool(m.get('resolved')),'observed_at':stamp(),'metadata':{'event_title':event.get('title'),'event_slug':event.get('slug'),'outcomes':outcomes,'clobTokenIds':tokens,'source':'gamma','source_url':'https://gamma-api.polymarket.com/events','start_time_field':'gameStartTime or event.startTime','market_type':m.get('sportsMarketType'),'event':event}},'market_id',True)
+            catalog_rows.append({'market_id':mid,'polymarket_event_id':str(event['id']),'condition_id':m.get('conditionId'),'question':m.get('question'),'slug':m.get('slug'),'sport':sport,'start_time':start,'end_time':m.get('endDate'),'closed':bool(m.get('closed')),'resolved':bool(m.get('resolved')),'observed_at':stamp(),'metadata':{'event_title':event.get('title'),'event_slug':event.get('slug'),'outcomes':outcomes,'clobTokenIds':tokens,'source':'gamma','source_url':'https://gamma-api.polymarket.com/events','start_time_field':'gameStartTime or event.startTime','market_type':m.get('sportsMarketType'),'event':event}})
             prices=arr(m.get('outcomePrices'))
             rows=[{'venue':'polymarket','market_id':mid,'condition_id':m.get('conditionId'),'token_id':str(t),'outcome':str(outcomes[i]) if i<len(outcomes) else None,'price':float(prices[i]) if i<len(prices) else None,'observed_at':stamp(),'payload':{'stream':'gamma_current'}} for i,t in enumerate(tokens)]
-            await put('prediction_market_snapshots',rows)
+            snapshot_rows.extend(rows)
             total+=1
+    unique={r['market_id']:r for r in catalog_rows}
+    rows=list(unique.values())
+    for j in range(0,len(rows),100): await put('polymarket_market_catalog',rows[j:j+100],'market_id',True)
+    for j in range(0,len(snapshot_rows),250): await put('prediction_market_snapshots',snapshot_rows[j:j+250])
+    for cp,closed,offset in checkpoints:
+        if cp: await db('PATCH','backfill_checkpoints',{'cursor_value':str(offset),'updated_at':stamp()},'?id=eq.'+str(cp[0]['id']))
+        else: await put('backfill_checkpoints',{'provider':'polymarket','stream':sport,'cursor_key':closed,'cursor_value':str(offset),'status':'running'})
     return total
 
 def match_candidate(event,market):

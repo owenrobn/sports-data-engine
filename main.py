@@ -16,7 +16,7 @@ async def db(method,table,payload=None,query="",prefer=None):
     if not (SUPABASE_URL and SUPABASE_KEY): return None
     async with httpx.AsyncClient(timeout=25) as c:
         h=headers()
-        if method=="POST": h["Prefer"]="return=representation,"+(prefer or "resolution=ignore-duplicates")
+        if method=="POST" and not table.startswith("rpc/"): h["Prefer"]="return=representation,"+(prefer or "resolution=ignore-duplicates")
         r=await c.request(method,f"{SUPABASE_URL}/rest/v1/{table}{query}",headers=h,json=payload)
         r.raise_for_status()
         return r.json() if r.content else None

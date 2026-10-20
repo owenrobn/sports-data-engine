@@ -108,8 +108,15 @@ async def espn(sport):
     sid=await sid_for(sport)
     known=await pages('provider_mappings',provider='eq.espn',entity_type='eq.event',order='id.asc')
     known={m['provider_entity_id']:m['canonical_id'] for m in known}
-    for days in (0,-1,-2,-3,-4,-5,-6,-7):
-        date=(datetime.now(timezone.utc)+timedelta(days=days)).strftime('%Y%m%d')
+    dates=[(datetime.now(timezone.utc)+timedelta(days=days)).strftime('%Y%m%d') for days in range(0,-8,-1)]
+    market_dates=await pages('polymarket_market_catalog',select='market_id,start_time',sport='eq.'+sport,order='market_id.asc')
+    history=sorted({dt(m.get('start_time')).strftime('%Y%m%d') for m in market_dates if dt(m.get('start_time')) and dt(m['start_time'])<=datetime.now(timezone.utc)},reverse=True)
+    history=[d for d in history if d not in dates]
+    checkpoints=await get('backfill_checkpoints',provider='eq.espn',stream='eq.'+sport,cursor_key='eq.catalog_dates',limit=1)
+    offset=int(checkpoints[0].get('cursor_value') or 0) if checkpoints else 0
+    if offset>=len(history): offset=0
+    dates+=history[offset:offset+2]
+    for date in dates:
         for league in leagues:
             payload=await fetch(f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard',{'dates':date,'limit':1000})
             events=payload.get('events') or []; imported=0; event_rows=[]; mapping_rows=[]; state_rows=[]; expected=0
@@ -149,6 +156,7 @@ async def espn(sport):
                 await put('provider_mappings',mapping_rows[j:j+100],'provider,entity_type,provider_entity_id')
                 await put(sport+'_match_events',state_rows[j:j+100])
             await universe('espn',sport,league+':'+date,expected,imported,'ESPN '+league+' named matches on '+date+'; excludes unlisted matches and unresolved brackets')
+    await put('backfill_checkpoints',{'provider':'espn','stream':sport,'cursor_key':'catalog_dates','cursor_value':str(offset+2),'status':'running','updated_at':stamp()},'provider,stream,cursor_key',True)
     return total
 
 async def catalog(sport):

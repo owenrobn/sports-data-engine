@@ -34,6 +34,7 @@ async def startup():
         asyncio.create_task(historical_polymarket_loop())
         asyncio.create_task(ingest_statsbomb_open())
         asyncio.create_task(ingest_tennis_archive())
+        asyncio.create_task(ingest_tennisvisuals_pbp())
         asyncio.create_task(build_event_market_timeline())
 
 SPORT_TERMS={
@@ -222,6 +223,43 @@ async def ingest_statsbomb_open():
                     for i in range(0,len(rows),200): await db("POST","football_match_events",rows[i:i+200])
                 except Exception as ex: emit("warning","StatsBomb event ingest failed",match=pid,error=str(ex))
             emit("backfill","StatsBomb competition imported",competition=comp.get("competition_name"),season=comp.get("season_name"))
+
+async def ingest_tennisvisuals_pbp():
+    sid=await sport_id("tennis")
+    api="https://api.github.com/repos/TennisVisuals/tennis-match-data/contents/point-by-point"
+    async with httpx.AsyncClient(timeout=60,follow_redirects=True,headers={"User-Agent":"SDE/0.6"}) as client:
+        try:
+            listing=(await client.get(api)).json()
+            files=[x for x in listing if isinstance(x,dict) and str(x.get("name","")).endswith((".csv",".csv.gz"))][:20]
+            for info in files:
+                raw=await client.get(info["download_url"])
+                if raw.status_code!=200: continue
+                import csv,io,gzip
+                body=raw.content
+                if info["name"].endswith(".gz"): body=gzip.decompress(body)
+                rows=list(csv.DictReader(io.StringIO(body.decode("utf-8",errors="replace"))))
+                await raw_ingest("tennisvisuals",info["name"],{"url":info["download_url"],"rows":len(rows)})
+                for m in rows[:5000]:
+                    p1=m.get("server1") or m.get("player1"); p2=m.get("server2") or m.get("player2")
+                    if not p1 or not p2: continue
+                    pid=f'tennisvisuals:{info["name"]}:{m.get("date")}:{p1}:{p2}'
+                    mapping=await db("GET","provider_mappings",query=f"?provider=eq.tennisvisuals&entity_type=eq.event&provider_entity_id=eq.{pid}&select=canonical_id&limit=1")
+                    if mapping: continue
+                    starts=m.get("date")
+                    if starts and len(starts)>=10: starts_at=starts[:10]+"T00:00:00+00:00"
+                    else: starts_at=None
+                    created=await db("POST","events",{"sport_id":sid,"name":f"{p1} vs {p2}","starts_at":starts_at,"status":"historical","metadata":{"source":"tennisvisuals","tournament":m.get("tournament"),"tour":m.get("tour"),"surface":m.get("surface"),"round":m.get("round"),"score":m.get("score"),"duration":m.get("duration")}})
+                    if not created: continue
+                    eid=created[0]["id"]; await db("POST","provider_mappings",{"provider":"tennisvisuals","entity_type":"event","provider_entity_id":pid,"canonical_id":eid})
+                    pbp=m.get("pbp") or ""
+                    point=0
+                    for ch in pbp:
+                        if ch not in "SRADsrad": continue
+                        point+=1
+                        server_won=ch.upper() in ("S","A")
+                        await db("POST","tennis_match_events",{"event_id":eid,"provider":"tennisvisuals","provider_event_id":f"{pid}:{point}","event_type":"point","point_number":point,"server_name":p1,"receiver_name":p2,"surface":m.get("surface"),"payload":{"code":ch,"server_won":server_won,"ace":ch.upper()=="A","double_fault":ch.upper()=="D"}})
+                emit("backfill","TennisVisuals point data imported",file=info["name"],matches=len(rows))
+        except Exception as ex: emit("error","TennisVisuals import failed",error=str(ex))
 
 async def ingest_tennis_archive():
     sid=await sport_id("tennis")

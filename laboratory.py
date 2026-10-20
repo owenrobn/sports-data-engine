@@ -1,5 +1,6 @@
 """Factual research views and bounded, restart-safe collectors."""
 import asyncio
+from bisect import bisect_right
 import csv
 import html
 import io
@@ -51,10 +52,10 @@ async def put(table,rows,keys=None,merge=False):
 async def get(table,**query): return await db('GET',table,query='?'+urlencode(query)) or []
 async def pages(table,**query):
     result=[]
-    for offset in range(0,100000,1000):
-        batch=await get(table,**{**query,'limit':1000,'offset':offset})
+    for offset in range(0,100000,100):
+        batch=await get(table,**{**query,'limit':100,'offset':offset})
         result.extend(batch)
-        if len(batch)<1000: return result
+        if len(batch)<100: return result
     raise RuntimeError('Pagination safety limit reached; query a narrower universe')
 async def fetch(url,params=None):
     async with httpx.AsyncClient(timeout=45,follow_redirects=True,headers={'User-Agent':'SportsDataEngine/0.6 public research'}) as c:
@@ -66,9 +67,9 @@ async def fetch(url,params=None):
         raise RuntimeError('Provider temporarily unavailable')
 async def tracked(provider,sport,fn):
     rid=str(uuid.uuid4())
-    await put('sde_provider_runs',{'id':rid,'provider':provider,'sport':sport,'details':{'instance':INSTANCE}})
     try:
-        n=await fn()
+        await put('sde_provider_runs',{'id':rid,'provider':provider,'sport':sport,'details':{'instance':INSTANCE}})
+        n=await asyncio.wait_for(fn(), timeout=600)
         await db('PATCH','sde_provider_runs',{'status':'completed','finished_at':stamp(),'records':n or 0},'?id=eq.'+rid)
         return n or 0
     except asyncio.CancelledError: raise
@@ -81,7 +82,10 @@ async def tracked(provider,sport,fn):
                 detail=ex.response.json(); msg+=' '+str(detail.get('code',''))
                 if detail.get('code') in ('21000','57014','42P01','42501','23505'): msg+=' '+str(detail.get('message',''))[:180]
             except (ValueError,AttributeError): pass
-        await db('PATCH','sde_provider_runs',{'status':'failed','finished_at':stamp(),'error':msg},'?id=eq.'+rid)
+        try:
+            await db('PATCH','sde_provider_runs',{'status':'failed','finished_at':stamp(),'error':msg},'?id=eq.'+rid)
+        except Exception:
+            pass  # A database outage must not kill the sport's collector lane.
         CTX['emit']('error','Collector failed',provider=provider,sport=sport,error=msg)
 async def universe(provider,sport,key,expected,imported,description):
     await put('sde_coverage_universes',{'provider':provider,'sport':sport,'universe_key':key,'expected_matches':expected,'imported_matches':imported,'description':description,'observed_at':stamp()},'provider,sport,universe_key',True)
@@ -152,7 +156,7 @@ async def catalog(sport):
     total=0
     items=[]; catalog_rows=[]; snapshot_rows=[]; checkpoints=[]
     sid=await sid_for(sport)
-    recent=await get('events',sport_id='eq.'+sid,starts_at='gte.'+(datetime.now(timezone.utc)-timedelta(days=7)).isoformat(),order='starts_at.asc',limit=20)
+    recent=await get('events',select='id,name,metadata,starts_at',sport_id='eq.'+sid,starts_at='gte.'+(datetime.now(timezone.utc)-timedelta(days=7)).isoformat(),order='starts_at.desc',limit=20)
     queries=[('tennis' if sport=='tennis' else 'soccer')]+[e['name'] for e in recent if (e.get('metadata') or {}).get('source')=='espn']
     for query in queries:
         p=await fetch('https://gamma-api.polymarket.com/public-search',{'q':query,'limit_per_type':50,'events_status':'all'})
@@ -193,6 +197,7 @@ def match_candidate(event,market):
     if meta.get('participant_names_incomplete'): return None
     names=meta.get('participants') or re.split(r'\s+(?:vs\.?|v)\s+',event.get('name',''),flags=re.I)
     if len(names)!=2: return None
+    if any(not norm(n) or norm(n) in ('tbd','unknown','bye') for n in names): return None
     title=(market.get('metadata') or {}).get('event_title') or market.get('question') or ''
     title=' '+norm(title)+' '
     exact=all(' '+norm(p)+' ' in title for p in names)
@@ -207,7 +212,9 @@ def match_candidate(event,market):
 async def link(sport):
     sid=await sid_for(sport)
     events=await pages('events',select='id,name,starts_at,metadata',sport_id='eq.'+sid,order='id.asc')
-    markets=await pages('polymarket_market_catalog',sport='eq.'+sport,order='market_id.asc'); total=0
+    markets=await pages('polymarket_market_catalog',select='market_id,polymarket_event_id,condition_id,question,start_time,metadata->event_title,metadata->market_type',sport='eq.'+sport,order='market_id.asc')
+    total=0
+    for m in markets: m['metadata']={'event_title':m.get('event_title'),'market_type':m.get('market_type')}
     for e in events:
         if (e.get('metadata') or {}).get('source')=='polymarket': continue
         for m in markets:
@@ -221,12 +228,12 @@ async def link(sport):
     return total
 
 async def market_history(sport):
-    links=await get('market_match_links',select='event_id,market_id,condition_id,metadata',limit=100,order='id.desc'); total=0
+    links=await pages('market_match_links',select='event_id,market_id,condition_id,metadata',order='id.asc'); total=0
     for l in links:
         if (l.get('metadata') or {}).get('sport')!=sport: continue
-        markets=await get('polymarket_market_catalog',market_id='eq.'+l['market_id'],limit=1)
+        markets=await get('polymarket_market_catalog',select='market_id,condition_id,metadata->outcomes,metadata->clobTokenIds',market_id='eq.'+l['market_id'],limit=1)
         if not markets: continue
-        m=markets[0]; meta=m['metadata']; outcomes=arr(meta.get('outcomes'))
+        m=markets[0]; meta=m; outcomes=arr(meta.get('outcomes'))
         for i,t in enumerate(arr(meta.get('clobTokenIds'))):
             history=await fetch('https://clob.polymarket.com/prices-history',{'market':t,'interval':'max','fidelity':1})
             rows=[{'event_id':l['event_id'],'venue':'polymarket','market_id':m['market_id'],'condition_id':m.get('condition_id'),'token_id':str(t),'outcome':outcomes[i] if i<len(outcomes) else None,'price':p['p'],'effective_at':datetime.fromtimestamp(int(p['t']),timezone.utc).isoformat(),'observed_at':stamp(),'payload':{'stream':'clob_price_history','source':'clob','token_id':str(t)}} for p in history.get('history',[]) if p.get('t') is not None and p.get('p') is not None]
@@ -239,16 +246,19 @@ async def market_history(sport):
     return total
 
 async def timeline(sport):
-    links=await get('market_match_links',order='id.asc',limit=1000); total=0
+    links=await pages('market_match_links',order='id.asc'); total=0
     for l in links:
         if (l.get('metadata') or {}).get('sport')!=sport: continue
         states=await pages(sport+'_match_events',event_id='eq.'+l['event_id'],order='id.asc')
         prices=await pages('prediction_market_snapshots',market_id='eq.'+l['market_id'],effective_at='not.is.null',order='effective_at.asc,id.asc')
         timed=sorted([x for x in states if dt(x.get('effective_at'))],key=lambda x:dt(x['effective_at']))
+        times=[dt(x['effective_at']) for x in timed]
         rows=[]
         for p in prices:
-            prior=[x for x in timed if dt(x['effective_at'])<=dt(p['effective_at'])]
-            state=prior[-1] if prior else None
+            price_time=dt(p.get('effective_at'))
+            if price_time is None: continue
+            position=bisect_right(times,price_time)-1
+            state=timed[position] if position>=0 else None
             rows.append({'event_id':l['event_id'],'sport':sport,'market_id':l['market_id'],'condition_id':l.get('condition_id'),'token_id':p.get('token_id'),'outcome':p.get('outcome'),'market_price':p.get('price'),'effective_at':p['effective_at'],'observed_at':stamp(),'source':'clob','state':state or {},'metadata':{'price_snapshot_id':p['id'],'state_alignment':'last known prior state' if state else 'no timestamped sport state','state_effective_at':state.get('effective_at') if state else None}})
         for j in range(0,len(rows),250): await put('event_market_timeline',rows[j:j+250])
         total+=len(rows)
@@ -309,14 +319,16 @@ async def run_engine(ctx):
     async def repair():
         total=0
         for table in ('prediction_market_snapshots','prediction_market_trades','prediction_market_books','event_market_timeline'):
-            while True:
+            for _ in range(10):
                 n=(await db('POST','rpc/sde_repair_tick',{'t':table})).get('processed',0)
                 if not n: break
                 total+=n
                 await asyncio.sleep(.05)
         return total
     async def repair_loop():
-        while await tracked('identity_repair','all',repair) is None: await asyncio.sleep(30)
+        while True:
+            await tracked('identity_repair','all',repair)
+            await asyncio.sleep(900)
     BACKGROUND.append(asyncio.create_task(repair_loop()))
     async def archives():
         while True:
@@ -417,4 +429,5 @@ def install(ctx):
         data=json.dumps(timeline_rows).replace('<','\\u003c')
         body+='<script type="application/json" id="replay-data">'+data+'</script><script>const rows=JSON.parse(document.getElementById("replay-data").textContent);document.getElementById("replay").addEventListener("input",e=>{document.getElementById("replay-state").textContent=JSON.stringify(rows[Number(e.target.value)]||{},null,2)});</script>'
         return page(event['name'],body)
+
 

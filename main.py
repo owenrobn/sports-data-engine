@@ -321,7 +321,7 @@ async function refresh(){try{
 refresh();setInterval(refresh,5000);</script></body></html>"""
 @app.get("/dashboard",response_class=HTMLResponse)
 async def dashboard():
-    counts=(await get_status()).get("counts",{})
+    counts=(await status()).get("counts",{})
     d=await data_overview()
     def e(v):
         import html

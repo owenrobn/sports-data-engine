@@ -114,7 +114,9 @@ async def operations():
         stale=age is None or age>ttl
         providers.append({'stale':stale,'expected_max_age_seconds':ttl,'sport':sport,'provider':provider,'status':r['status'],'records':r.get('records'),'age_seconds':round(age) if age is not None else None,'stalled':bool(r['status']=='running' and age is not None and age>660),'last_error':r.get('error'),'started_at':r.get('started_at'),'finished_at':r.get('finished_at')})
     from context_feed import provider_status
-    return {'generated_at':clock().isoformat(),'providers':providers,'access':provider_status(),'blockers':['API Tennis and Sportmonks credentials are needed for their inactive feeds.','Independent fixture/benchmark feeds and private account access are not configured.','Continuous hosting and database capacity need an infrastructure plan; no paid upgrades were applied.'],'service_continuity':'Collectors run while the service is awake. Source errors and missing data are not successful coverage.'}
+    access=provider_status()
+    access_gaps=[name+' feed access is not configured.' for name in ('api_tennis','sportmonks','bookmaker_odds','tracking_data') if not access[name]['configured']]
+    return {'generated_at':clock().isoformat(),'providers':providers,'access':access,'blockers':access_gaps+['Independent fixture/benchmark feeds and private account access are not configured.','Continuous hosting and database capacity need an infrastructure plan; no paid upgrades were applied.'],'service_continuity':'Collectors run while the service is awake. Source errors and missing data are not successful coverage.'}
 
 def install(ctx):
     CTX.update(ctx);app=ctx['app']

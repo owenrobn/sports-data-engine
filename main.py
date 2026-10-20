@@ -8,6 +8,7 @@ app=FastAPI(title="Sports Data Engine",version="0.5.0")
 SUPABASE_URL=os.getenv("SUPABASE_URL","").rstrip("/")
 SUPABASE_KEY=os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 mem_events=[]; mem_jobs={}
+DB_CLIENT=None
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def headers():
@@ -17,13 +18,16 @@ async def db(method,table,payload=None,query="",prefer=None):
     identities={"football_match_events":"provider,event_id,provider_event_id","tennis_match_events":"provider,event_id,provider_event_id","prediction_market_snapshots":"ingest_key","prediction_market_trades":"ingest_key","prediction_market_books":"ingest_key","event_market_timeline":"ingest_key","backfill_checkpoints":"provider,stream,cursor_key"}
     if method=="POST" and table in identities and "on_conflict=" not in query:
         query+=("&" if query else "?")+"on_conflict="+identities[table]
-    async with httpx.AsyncClient(timeout=25) as c:
-        h=headers()
-        if method=="POST" and not table.startswith("rpc/"): h["Prefer"]=(prefer or "resolution=ignore-duplicates")
-        if method=="POST" and not table.startswith("rpc/") and "return=" not in h["Prefer"]: h["Prefer"]="return=representation,"+h["Prefer"]
-        r=await c.request(method,f"{SUPABASE_URL}/rest/v1/{table}{query}",headers=h,json=payload)
-        r.raise_for_status()
-        return r.json() if r.content else None
+    global DB_CLIENT
+    if DB_CLIENT is None or DB_CLIENT.is_closed:
+        DB_CLIENT=httpx.AsyncClient(timeout=25,limits=httpx.Limits(max_connections=20,max_keepalive_connections=10))
+    c=DB_CLIENT
+    h=headers()
+    if method=="POST" and not table.startswith("rpc/"): h["Prefer"]=(prefer or "resolution=ignore-duplicates")
+    if method=="POST" and not table.startswith("rpc/") and "return=" not in h["Prefer"]: h["Prefer"]="return=representation,"+h["Prefer"]
+    r=await c.request(method,f"{SUPABASE_URL}/rest/v1/{table}{query}",headers=h,json=payload)
+    r.raise_for_status()
+    return r.json() if r.content else None
 async def job_patch(jid,**fields):
     fields["updated_at"]=now(); mem_jobs.setdefault(jid,{}).update(fields)
     try: await db("PATCH","ingestion_jobs",fields,f"?id=eq.{jid}")
@@ -557,3 +561,9 @@ from bookmaker_feed import install as install_bookmakers
 install_bookmakers(globals())
 from engine_delivery import install as install_delivery
 install_delivery(globals())
+
+@app.on_event('shutdown')
+async def close_shared_clients():
+    if DB_CLIENT is not None: await DB_CLIENT.aclose()
+    from context_feed import close_source_client
+    await close_source_client()

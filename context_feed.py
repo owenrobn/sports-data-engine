@@ -18,6 +18,7 @@ CTX={}
 NS=uuid.UUID('4ec4b3d7-4860-46d0-83d8-45850fab6fa1')
 UTC=timezone.utc
 TABLE='sde_context_evidence'
+SOURCE_CLIENT=None
 
 def clock(): return datetime.now(UTC)
 def date(v):
@@ -75,10 +76,15 @@ async def all_rows(**query):
 
 async def get_json(url,params=None,headers=None):
     # Caller records only the base URL. Never persist API-token query strings.
-    async with httpx.AsyncClient(timeout=25,follow_redirects=True) as c:
-        response=await c.get(url,params=params,headers=headers)
-        response.raise_for_status()
-        return response.json()
+    global SOURCE_CLIENT
+    if SOURCE_CLIENT is None or SOURCE_CLIENT.is_closed:
+        SOURCE_CLIENT=httpx.AsyncClient(timeout=25,follow_redirects=True,limits=httpx.Limits(max_connections=12,max_keepalive_connections=8))
+    response=await SOURCE_CLIENT.get(url,params=params,headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+async def close_source_client():
+    if SOURCE_CLIENT is not None: await SOURCE_CLIENT.aclose()
 
 def scoreboard_records(event,sport,observation):
     """Retain identities, complete results, and supplied stats. No invented match minutes."""

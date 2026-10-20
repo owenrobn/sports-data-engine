@@ -3,6 +3,7 @@ import asyncio
 from bisect import bisect_right
 import csv
 import html
+import hashlib
 import io
 import json
 import re
@@ -159,10 +160,17 @@ async def espn(sport):
     await put('backfill_checkpoints',{'provider':'espn','stream':sport,'cursor_key':'catalog_dates','cursor_value':str(offset+2),'status':'running','updated_at':stamp()},'provider,stream,cursor_key',True)
     return total
 
+def closed_price_fingerprint(market):
+    if market.get('closed') is not True: return None
+    values=[arr(market.get('clobTokenIds')),arr(market.get('outcomes')),arr(market.get('outcomePrices')),market.get('resolved')]
+    return hashlib.sha256(json.dumps(values,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
 async def catalog(sport):
     # Search pages supplement paginated active/closed feeds; both sports receive the same budget.
     total=0
     items=[]; catalog_rows=[]; snapshot_rows=[]; checkpoints=[]
+    previous=await pages('polymarket_market_catalog',select='market_id,metadata->closed_price_fingerprint',sport='eq.'+sport,order='market_id.asc')
+    fingerprints={r['market_id']:r.get('closed_price_fingerprint') for r in previous}
     sid=await sid_for(sport)
     recent=await get('events',select='id,name,metadata,starts_at',sport_id='eq.'+sid,starts_at='gte.'+(datetime.now(timezone.utc)-timedelta(days=7)).isoformat(),order='starts_at.desc',limit=20)
     queries=[('tennis' if sport=='tennis' else 'soccer')]+[e['name'] for e in recent if (e.get('metadata') or {}).get('source')=='espn']
@@ -197,15 +205,18 @@ async def catalog(sport):
             if not mid: continue
             tokens=arr(m.get('clobTokenIds')); outcomes=arr(m.get('outcomes'))
             start=m.get('gameStartTime') or event.get('startTime')
-            catalog_rows.append({'market_id':mid,'polymarket_event_id':str(event['id']),'condition_id':m.get('conditionId'),'question':m.get('question'),'slug':m.get('slug'),'sport':sport,'start_time':start,'end_time':m.get('endDate'),'closed':bool(m.get('closed')),'resolved':bool(m.get('resolved')),'observed_at':stamp(),'metadata':{'event_title':event.get('title'),'event_slug':event.get('slug'),'outcomes':outcomes,'clobTokenIds':tokens,'source':'gamma','source_url':'https://gamma-api.polymarket.com/events','start_time_field':'gameStartTime or event.startTime','market_type':m.get('sportsMarketType'),'event':{k:v for k,v in event.items() if k!='markets'}}})
+            fingerprint=closed_price_fingerprint(m)
+            catalog_rows.append({'market_id':mid,'polymarket_event_id':str(event['id']),'condition_id':m.get('conditionId'),'question':m.get('question'),'slug':m.get('slug'),'sport':sport,'start_time':start,'end_time':m.get('endDate'),'closed':bool(m.get('closed')),'resolved':bool(m.get('resolved')),'observed_at':stamp(),'metadata':{'event_title':event.get('title'),'event_slug':event.get('slug'),'outcomes':outcomes,'clobTokenIds':tokens,'source':'gamma','source_url':'https://gamma-api.polymarket.com/events','start_time_field':'gameStartTime or event.startTime','market_type':m.get('sportsMarketType'),'closed_price_fingerprint':fingerprint,'event':{k:v for k,v in event.items() if k!='markets'}}})
             prices=arr(m.get('outcomePrices'))
             rows=[{'venue':'polymarket','market_id':mid,'condition_id':m.get('conditionId'),'token_id':str(t),'outcome':str(outcomes[i]) if i<len(outcomes) else None,'price':float(prices[i]) if i<len(prices) else None,'observed_at':stamp(),'payload':{'stream':'gamma_current'}} for i,t in enumerate(tokens)]
-            snapshot_rows.extend(rows)
+            if fingerprint is None or fingerprints.get(mid)!=fingerprint:
+                snapshot_rows.extend(rows)
             total+=1
     unique={r['market_id']:r for r in catalog_rows}
     rows=list(unique.values())
-    for j in range(0,len(rows),100): await put('polymarket_market_catalog',rows[j:j+100],'market_id',True)
+    # Persist price receipts before marking a closed-state fingerprint seen. Failed writes remain retryable.
     for j in range(0,len(snapshot_rows),250): await put('prediction_market_snapshots',snapshot_rows[j:j+250])
+    for j in range(0,len(rows),100): await put('polymarket_market_catalog',rows[j:j+100],'market_id',True)
     for cp,closed,offset in checkpoints:
         if cp: await db('PATCH','backfill_checkpoints',{'cursor_value':str(offset),'updated_at':stamp()},'?id=eq.'+str(cp[0]['id']))
         else: await put('backfill_checkpoints',{'provider':'polymarket','stream':sport,'cursor_key':closed,'cursor_value':str(offset),'status':'running'})

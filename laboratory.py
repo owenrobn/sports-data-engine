@@ -6,6 +6,7 @@ import io
 import json
 import re
 import uuid
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode, quote
 import httpx
@@ -14,6 +15,13 @@ from fastapi.responses import HTMLResponse
 
 NS=uuid.UUID('f6265896-7731-462d-898f-6506167a308b')
 CTX={}
+SPORT_IDS={}
+MAPPINGS={}
+INSTANCE=str(uuid.uuid4())
+BACKGROUND=[]
+async def sid_for(sport):
+    if sport not in SPORT_IDS: SPORT_IDS[sport]=await CTX['sport_id'](sport)
+    return SPORT_IDS[sport]
 def stamp(): return datetime.now(timezone.utc).isoformat()
 def uid(text): return str(uuid.uuid5(NS,text))
 def arr(v):
@@ -21,7 +29,9 @@ def arr(v):
     try: return json.loads(v or '[]')
     except (ValueError,TypeError): return []
 def esc(v): return html.escape(str(v if v is not None else 'Unknown'))
-def norm(v): return ' '.join(re.findall(r'[a-z0-9]+',str(v).lower()))
+def norm(v):
+    text=unicodedata.normalize('NFKD',str(v)).encode('ascii','ignore').decode().lower()
+    return ' '.join(re.findall(r'[a-z0-9]+',text))
 def competitions(event):
     result=[]
     def walk(node):
@@ -56,10 +66,11 @@ async def fetch(url,params=None):
         raise RuntimeError('Provider temporarily unavailable')
 async def tracked(provider,sport,fn):
     rid=str(uuid.uuid4())
-    await put('sde_provider_runs',{'id':rid,'provider':provider,'sport':sport})
+    await put('sde_provider_runs',{'id':rid,'provider':provider,'sport':sport,'details':{'instance':INSTANCE}})
     try:
         n=await fn()
         await db('PATCH','sde_provider_runs',{'status':'completed','finished_at':stamp(),'records':n or 0},'?id=eq.'+rid)
+        return n or 0
     except asyncio.CancelledError: raise
     except Exception as ex:
         # Persist only error classes/status, never request URLs, headers or keys.
@@ -75,21 +86,29 @@ async def tracked(provider,sport,fn):
 async def universe(provider,sport,key,expected,imported,description):
     await put('sde_coverage_universes',{'provider':provider,'sport':sport,'universe_key':key,'expected_matches':expected,'imported_matches':imported,'description':description,'observed_at':stamp()},'provider,sport,universe_key',True)
 async def canonical(provider,pid,sport,name,start,metadata,status='scheduled'):
-    mapping=await get('provider_mappings',select='canonical_id',provider='eq.'+provider,entity_type='eq.event',provider_entity_id='eq.'+pid,limit=1)
-    eid=mapping[0]['canonical_id'] if mapping else uid(provider+':'+pid)
-    sid=await CTX['sport_id'](sport)
+    if provider not in MAPPINGS:
+        known=await pages('provider_mappings',provider='eq.'+provider,entity_type='eq.event',order='id.asc')
+        MAPPINGS[provider]={m['provider_entity_id']:m['canonical_id'] for m in known}
+    existing=MAPPINGS[provider].get(pid)
+    eid=existing or uid(provider+':'+pid)
+    sid=await sid_for(sport)
     await put('events',{'id':eid,'sport_id':sid,'name':name,'starts_at':start,'status':status,'metadata':{'source':provider,'provider_match_id':pid,**metadata},'updated_at':stamp()},'id',True)
-    await put('provider_mappings',{'provider':provider,'entity_type':'event','provider_entity_id':pid,'canonical_id':eid},'provider,entity_type,provider_entity_id')
+    if not existing:
+        await put('provider_mappings',{'provider':provider,'entity_type':'event','provider_entity_id':pid,'canonical_id':eid},'provider,entity_type,provider_entity_id')
+        MAPPINGS[provider][pid]=eid
     return eid
 
 async def espn(sport):
     leagues=['eng.1','esp.1','ger.1','ita.1','fra.1','uefa.champions'] if sport=='football' else ['atp','wta']
     path='soccer' if sport=='football' else 'tennis'; total=0; seen=set()
+    sid=await sid_for(sport)
+    known=await pages('provider_mappings',provider='eq.espn',entity_type='eq.event',order='id.asc')
+    known={m['provider_entity_id']:m['canonical_id'] for m in known}
     for days in (0,-1,-2,-3,-4,-5,-6,-7):
         date=(datetime.now(timezone.utc)+timedelta(days=days)).strftime('%Y%m%d')
         for league in leagues:
             payload=await fetch(f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard',{'dates':date,'limit':1000})
-            events=payload.get('events') or []; imported=0
+            events=payload.get('events') or []; imported=0; event_rows=[]; mapping_rows=[]; state_rows=[]; expected=0
             for event in events:
                 for comp in competitions(event):
                     scheduled=comp.get('date') or event.get('date')
@@ -99,6 +118,7 @@ async def espn(sport):
                     def label(p): return (p.get('team') or p.get('athlete') or {}).get('displayName') or p.get('displayName')
                     names=[label(p) for p in players]
                     if not all(names) or any(norm(n) in ('tbd','unknown','bye') for n in names): continue
+                    expected+=1
                     pid=str(comp.get('id') or event['id']); start=scheduled
                     if pid in seen: continue
                     seen.add(pid)
@@ -106,25 +126,32 @@ async def espn(sport):
                     if dt(start) is None: start=None
                     competition=(payload.get('leagues') or [{}])[0].get('name') or league
                     state=comp.get('status') or event.get('status') or {}
-                    eid=await canonical('espn',pid,sport,' vs '.join(names),start,{'competition':competition,'tournament':event.get('name') if sport=='tennis' else None,'participants':names,'league':league,'provider_event_id':str(event['id']),'source_url':f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard','observed_at':stamp(),'time_precision':'provider_scheduled','status':state},(state.get('type') or {}).get('name','scheduled'))
+                    eid=known.get(pid) or uid('espn:'+pid)
+                    event_rows.append({'id':eid,'sport_id':sid,'name':' vs '.join(names),'starts_at':start,'status':(state.get('type') or {}).get('name','scheduled'),'updated_at':stamp(),'metadata':{'source':'espn','provider_match_id':pid,'competition':competition,'tournament':event.get('name') if sport=='tennis' else None,'participants':names,'league':league,'provider_event_id':str(event['id']),'source_url':f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard','observed_at':stamp(),'source_date':scheduled[:10] if scheduled else None,'time_precision':'provider_scheduled' if start else 'date_only','status':state}})
+                    mapping_rows.append({'provider':'espn','entity_type':'event','provider_entity_id':pid,'canonical_id':eid})
                     # A scoreboard is an observation, never a backdated point/event.
                     row={'event_id':eid,'provider':'espn','provider_event_id':uid(pid+':'+json.dumps({'status':state,'scores':[p.get('score') for p in players],'sets':[p.get('linescores') for p in players]},sort_keys=True)),'event_type':'score_observation','effective_at':None,'observed_at':stamp(),'payload':{'status':state,'competitors':players,'source_url':f'https://site.api.espn.com/apis/site/v2/sports/{path}/{league}/scoreboard'}}
                     if sport=='football':
+                        row.update(home_score=None,away_score=None)
                         for p in players:
                             if p.get('homeAway') not in ('home','away'): continue
                             k=p['homeAway']+'_score'
                             try: row[k]=int(p.get('score'))
                             except (ValueError,TypeError): pass
-                    await put(sport+'_match_events',row)
+                    state_rows.append(row)
                     imported+=1; total+=1
-            await universe('espn',sport,league+':'+date,sum(len(competitions(e)) for e in events),imported,'ESPN '+league+' scoreboard '+date+'; excludes unlisted matches')
+            for j in range(0,len(event_rows),100):
+                await put('events',event_rows[j:j+100],'id',True)
+                await put('provider_mappings',mapping_rows[j:j+100],'provider,entity_type,provider_entity_id')
+                await put(sport+'_match_events',state_rows[j:j+100])
+            await universe('espn',sport,league+':'+date,expected,imported,'ESPN '+league+' named matches on '+date+'; excludes unlisted matches and unresolved brackets')
     return total
 
 async def catalog(sport):
     # Search pages supplement paginated active/closed feeds; both sports receive the same budget.
     total=0
     items=[]; catalog_rows=[]; snapshot_rows=[]; checkpoints=[]
-    sid=await CTX['sport_id'](sport)
+    sid=await sid_for(sport)
     recent=await get('events',sport_id='eq.'+sid,starts_at='gte.'+(datetime.now(timezone.utc)-timedelta(days=7)).isoformat(),order='starts_at.asc',limit=20)
     queries=[('tennis' if sport=='tennis' else 'soccer')]+[e['name'] for e in recent if (e.get('metadata') or {}).get('source')=='espn']
     for query in queries:
@@ -168,13 +195,17 @@ def match_candidate(event,market):
     if len(names)!=2: return None
     title=(market.get('metadata') or {}).get('event_title') or market.get('question') or ''
     title=' '+norm(title)+' '
-    if not all(' '+norm(p)+' ' in title for p in names): return None
+    exact=all(' '+norm(p)+' ' in title for p in names)
+    if not exact:
+        # Suggestions may tolerate surname/club-form differences, never acceptance.
+        tokens=[set(norm(n).split())-{'fc','cf','afc','club'} for n in names]
+        if not all(t and t.issubset(set(title.split())) for t in tokens): return None
     a,b=dt(event.get('starts_at')),dt(market.get('start_time'))
     distance=abs((a-b).total_seconds())/60 if a and b else None
     # Exact full participant pair + provider match time; no fuzzy auto-acceptance.
-    return {'accepted':distance is not None and distance<=180,'distance':distance,'reason':'exact participant pair; match-time agreement required'}
+    return {'accepted':exact and distance is not None and distance<=180,'distance':distance,'reason':'exact participant pair and match-time agreement' if exact else 'club-form suggestion; review required'}
 async def link(sport):
-    sid=await CTX['sport_id'](sport)
+    sid=await sid_for(sport)
     events=await pages('events',select='id,name,starts_at,metadata',sport_id='eq.'+sid,order='id.asc')
     markets=await pages('polymarket_market_catalog',sport='eq.'+sport,order='market_id.asc'); total=0
     for e in events:
@@ -276,15 +307,22 @@ async def tennis_points():
 async def run_engine(ctx):
     CTX.update(ctx)
     async def repair():
+        total=0
         for table in ('prediction_market_snapshots','prediction_market_trades','prediction_market_books','event_market_timeline'):
-            while (await db('POST','rpc/sde_repair_tick',{'t':table})).get('processed',0):
+            while True:
+                n=(await db('POST','rpc/sde_repair_tick',{'t':table})).get('processed',0)
+                if not n: break
+                total+=n
                 await asyncio.sleep(.05)
-    asyncio.create_task(tracked('identity_repair','all',repair))
+        return total
+    async def repair_loop():
+        while await tracked('identity_repair','all',repair) is None: await asyncio.sleep(30)
+    BACKGROUND.append(asyncio.create_task(repair_loop()))
     async def archives():
         while True:
             await asyncio.gather(tracked('statsbomb','football',ctx['ingest_statsbomb_open']),tracked('tennisvisuals_v2','tennis',tennis_points))
             await asyncio.sleep(900)
-    asyncio.create_task(archives())
+    BACKGROUND.append(asyncio.create_task(archives()))
     while True:
         # Separate lanes give both sports equal time even when one provider is slow.
         async def lane(sport):
@@ -301,16 +339,29 @@ def table(headers,rows): return '<div class="scroll"><table><thead><tr>'+''.join
 def percent(n,d): return f'{100*n/d:.1f}%' if d else 'Unknown (no declared universe)'
 async def coverage_html():
     cov=await get('sde_sport_coverage',order='sport.asc')
-    return '<section><h2>Football and tennis coverage</h2><p>Percentages use the declared provider universe or ingested sporting matches. Market catalog events are excluded from sporting-match denominators.</p>'+table(['Sport','Matches','State coverage','Accepted links','Price coverage','Catalog','Declared-universe ingestion'],[[f'<a href="/research/{x["sport"]}">{esc(x["sport"])}</a>',x['canonical_matches'],percent(x['matches_with_states'],x['canonical_matches']),percent(x['linked_matches'],x['canonical_matches']),percent(x['matches_with_prices'],x['canonical_matches']),x['catalog_markets'],percent(x['imported_target_matches'] or 0,x['target_matches'])] for x in cov])+'<p>ESPN scoreboards: selected competitions and dates only. Archive timestamps and historical order-book depth remain unknown where unavailable.</p></section>'
+    rows=[]
+    for x in cov:
+        d=x['canonical_matches']
+        rows.append([f'<a href="/research/{x["sport"]}">{esc(x["sport"])}</a>',d,percent(x['matches_with_states'],d),percent(x.get('matches_with_points',0),d) if x['sport']=='tennis' else 'N/A',percent(x['linked_matches'],d),percent(x['matches_with_prices'],d),percent(x.get('matches_with_trades',0),d),percent(x.get('matches_with_books',0),d),x['catalog_markets'],percent(x['imported_target_matches'] or 0,x['target_matches'])])
+    return '<section><h2>Football and tennis coverage</h2><p>State presence includes score observations; it does not imply a complete play-by-play record. Percentages use ingested sporting matches. Market-only events and quarantined point states are excluded. Declared-universe ingestion uses the sum of named provider targets, which can overlap.</p>'+table(['Sport','Matches','State presence','Point sequences','Accepted links','Historical prices','Trades','Book snapshots','Catalog','Declared-universe ingestion'],rows)+'<p>ESPN scoreboards cover selected competitions and dates. Archive timestamps and historical order-book depth remain unknown where unavailable.</p></section>'
 
 def install(ctx):
     CTX.update(ctx); app=ctx['app']
+    @app.on_event('shutdown')
+    async def stop():
+        tasks=BACKGROUND+[getattr(app.state,'engine',None)]
+        tasks=[t for t in tasks if t is not None]
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks,return_exceptions=True)
+        if ctx['SUPABASE_KEY']:
+            await db('PATCH','sde_provider_runs',{'status':'interrupted','finished_at':stamp()},'?status=eq.running&details->>instance=eq.'+INSTANCE)
     original=next(r.endpoint for r in app.routes if getattr(r,'path',None)=='/dashboard')
     async def dashboard():
         baseline=await original()
         try: extra=await coverage_html()
         except Exception: extra='<section>Coverage temporarily unavailable. <a href="/research/health">Provider health</a></section>'
-        return baseline.replace('</body>',extra+'</body>')
+        extra='<nav><a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health and errors</a></nav>'+extra
+        return baseline.replace('<div class=grid id=metrics>',extra+'<div class=grid id=metrics>',1)
     for r in list(app.routes):
         if getattr(r,'path',None)=='/dashboard': app.routes.remove(r)
     app.add_api_route('/dashboard',dashboard,response_class=HTMLResponse)

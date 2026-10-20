@@ -1,0 +1,23 @@
+name: Keep SDE awake
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/keep-warm.yml']
+permissions: {}
+concurrency:
+  group: sde-health-ping
+  cancel-in-progress: false
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping and validate the existing SDE service
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location --max-time 90 --retry 2 --retry-delay 5 https://sports-data-engine.onrender.com/health -o health.json
+          python3 -c 'import json; d=json.load(open("health.json")); assert d.get("ok") is True and d.get("service")=="sports-data-engine"; print("SDE health ping passed")'
+

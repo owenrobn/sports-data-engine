@@ -100,3 +100,62 @@ revoke all on function public.sde_repair_batch(text) from public;
 grant execute on function public.sde_repair_batch(text) to service_role;
 create index if not exists sde_pending_price_repair on public.prediction_market_snapshots(id) where ingest_key is null;
 create index if not exists sde_pending_trade_repair on public.prediction_market_trades(id) where ingest_key is null;
+
+CREATE OR REPLACE FUNCTION public.sde_repair_batch(t text)
+ RETURNS integer
+ LANGUAGE plpgsql
+ SET search_path TO ''
+ SET statement_timeout TO '20s'
+AS $function$
+declare n integer;
+begin
+ if t not in ('prediction_market_snapshots','prediction_market_trades','prediction_market_books','event_market_timeline') then raise exception 'unsupported table'; end if;
+ perform pg_advisory_xact_lock(hashtext('sde_repair_'||t));
+ create temporary table if not exists sde_batch(id bigint,k text,r jsonb,duplicate boolean) on commit drop;
+ truncate pg_temp.sde_batch; create index if not exists sde_batch_identity on pg_temp.sde_batch(k,id);
+ execute format('insert into pg_temp.sde_batch(id,k,r) select id,public.sde_row_identity(%L,to_jsonb(x)),to_jsonb(x) from public.%I x where ingest_key is null order by id limit 500',t,t);
+ get diagnostics n=row_count;
+ execute format('update pg_temp.sde_batch b set duplicate=exists(select 1 from public.%I x where x.ingest_key=b.k and x.id<>b.id) or exists(select 1 from pg_temp.sde_batch a where a.k=b.k and a.id<b.id) where b.id is not null',t);
+ insert into public.sde_duplicate_archive(table_name,row_id,row_data) select t,id,r from pg_temp.sde_batch where duplicate on conflict do nothing;
+ execute format('delete from public.%I x using pg_temp.sde_batch b where x.id=b.id and b.duplicate',t);
+ execute format('update public.%I x set ingest_key=b.k from pg_temp.sde_batch b where x.id=b.id and not b.duplicate',t);
+ if t='prediction_market_snapshots' then
+ update public.prediction_market_snapshots x set token_id=coalesce(x.token_id,x.payload->>'token_id'),effective_at=coalesce(x.effective_at,x.observed_at),payload=x.payload||'{"legacy_observed_at_is_source_time":true,"retrieval_time_unknown":true}'::jsonb
+ from pg_temp.sde_batch b where x.id=b.id and x.payload->>'stream'='clob_price_history' and x.effective_at is null;
+ end if;
+ return n;
+end $function$
+
+CREATE OR REPLACE FUNCTION public.sde_repair_tick(t text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SET search_path TO ''
+ SET statement_timeout TO '20s'
+AS $function$
+declare n int;begin n:=public.sde_repair_batch(t);return jsonb_build_object('processed',n);end $function$
+
+CREATE OR REPLACE FUNCTION public.sde_row_identity(t text, r jsonb)
+ RETURNS text
+ LANGUAGE sql
+ IMMUTABLE
+ SET search_path TO ''
+AS $function$
+ select md5((case
+ when t='prediction_market_snapshots' then jsonb_build_array(r->'venue',r->'market_id',coalesce(nullif(r->>'token_id',''),r->'payload'->>'token_id',r->>'outcome'),coalesce(r->>'effective_at',r->>'observed_at'),r->'price')
+ when t='prediction_market_trades' then jsonb_build_array(r->'venue',r->'market_id',r->'token_id',r->'trade_id',r->'trader',r->'side',r->'outcome',r->'price',r->'size',r->'executed_at')
+ when t='prediction_market_books' then jsonb_build_array(r->'venue',r->'market_id',r->'token_id',r->'observed_at',r->'bids',r->'asks')
+ else jsonb_build_array(r->'event_id',r->'market_id',r->'token_id',r->'effective_at',r->'source') end)::text)
+$function$
+
+CREATE OR REPLACE FUNCTION public.sde_set_identity()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO ''
+AS $function$
+begin new.ingest_key:=public.sde_row_identity(tg_table_name,to_jsonb(new)); return new; end $function$
+
+revoke all on function public.sde_repair_tick(text) from public;
+grant execute on function public.sde_repair_tick(text) to service_role;
+create unique index if not exists football_match_events_sde_identity on public.football_match_events(provider,event_id,provider_event_id);
+create unique index if not exists tennis_match_events_sde_identity on public.tennis_match_events(provider,event_id,provider_event_id);
+notify pgrst,'reload schema';

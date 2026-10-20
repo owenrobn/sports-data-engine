@@ -1,6 +1,6 @@
 import asyncio, json, os, uuid
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 import httpx
 
@@ -12,10 +12,12 @@ mem_events=[]; mem_jobs={}
 def now(): return datetime.now(timezone.utc).isoformat()
 def headers():
     return {"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}","Content-Type":"application/json","Prefer":"return=representation"}
-async def db(method,table,payload=None,query=""):
+async def db(method,table,payload=None,query="",prefer=None):
     if not (SUPABASE_URL and SUPABASE_KEY): return None
     async with httpx.AsyncClient(timeout=25) as c:
-        r=await c.request(method,f"{SUPABASE_URL}/rest/v1/{table}{query}",headers=headers(),json=payload)
+        h=headers()
+        if method=="POST": h["Prefer"]="return=representation,"+(prefer or "resolution=ignore-duplicates")
+        r=await c.request(method,f"{SUPABASE_URL}/rest/v1/{table}{query}",headers=h,json=payload)
         r.raise_for_status()
         return r.json() if r.content else None
 async def job_patch(jid,**fields):
@@ -29,15 +31,8 @@ def emit(kind,message,**data):
 async def startup():
     emit("system","SDE v0.5 online",persistent=bool(SUPABASE_KEY))
     if SUPABASE_KEY:
-        asyncio.create_task(bootstrap_collectors())
-        asyncio.create_task(collection_loop())
-        asyncio.create_task(historical_polymarket_loop())
-        asyncio.create_task(ingest_statsbomb_open())
-        asyncio.create_task(ingest_tennis_archive())
-        asyncio.create_task(ingest_tennisvisuals_pbp())
-        asyncio.create_task(build_event_market_timeline())
-        asyncio.create_task(link_sports_markets())
-        asyncio.create_task(backfill_polymarket_catalog())
+        from laboratory import run_engine
+        app.state.engine=asyncio.create_task(run_engine(globals()))
 
 SPORT_TERMS={
  "football":["soccer","football","premier league","champions league","la liga","serie a","bundesliga","ligue 1","mls","uefa","fifa"],
@@ -207,7 +202,7 @@ async def ingest_statsbomb_open():
             except: continue
             for match in matches[:50]:
                 name=f'{match.get("home_team",{}).get("home_team_name")} vs {match.get("away_team",{}).get("away_team_name")}'
-                start=f'{match.get("match_date")}T{match.get("kick_off") or "00:00:00"}'
+                start=None  # Provider local kickoff has no verified timezone.
                 sid=await sport_id("football"); pid=str(match.get("match_id"))
                 mapping=await db("GET","provider_mappings",query=f"?provider=eq.statsbomb&entity_type=eq.event&provider_entity_id=eq.{pid}&select=canonical_id&limit=1")
                 if mapping: eid=mapping[0]["canonical_id"]
@@ -220,7 +215,7 @@ async def ingest_statsbomb_open():
                     rows=[]
                     for x in evs:
                         typ=(x.get("type") or {}).get("name")
-                        if typ not in ("Shot","Own Goal Against","Own Goal For","Yellow Card","Red Card","Substitution"): continue
+                        if typ not in ("Shot","Own Goal Against","Own Goal For","Bad Behaviour","Foul Committed","Substitution"): continue
                         minute=x.get("minute"); second=x.get("second"); period=x.get("period")
                         rows.append({"event_id":eid,"provider":"statsbomb","provider_event_id":str(x.get("id")),"event_type":typ,"period":period,"minute":minute,"second":second,"team_name":(x.get("team") or {}).get("name"),"player_name":(x.get("player") or {}).get("name"),"xg":(x.get("shot") or {}).get("statsbomb_xg"),"payload":x})
                     for i in range(0,len(rows),200): await db("POST","football_match_events",rows[i:i+200])
@@ -457,7 +452,10 @@ async def raw_ingest(provider,resource_id,payload):
     if SUPABASE_KEY: await db("POST","raw_ingestions",row)
 
 @app.post("/jobs/discover/{provider}/{sport}/{date}")
-async def discover(provider:str,sport:str,date:str):
+async def discover(provider:str,sport:str,date:str,x_sde_admin_token:str=Header(default="")):
+    import secrets
+    expected=os.getenv("SDE_ADMIN_TOKEN","")
+    if not expected or not secrets.compare_digest(x_sde_admin_token,expected): raise HTTPException(403,"Collector control requires administrator authentication")
     if provider not in ("sofascore","polymarket","thesportsdb"): raise HTTPException(400,"cloud discovery currently supports sofascore or polymarket")
     jid=await create_job(provider,sport,date); asyncio.create_task(run_discovery(jid,provider,sport,date)); return {"job_id":jid}
 
@@ -531,3 +529,8 @@ async def dashboard():
     page=page.replace('<tbody id=books></tbody>','<tbody id=books>'+brows+'</tbody>')
     page=page.replace('<div class=card><h2>Live collector feed</h2><pre id=feed>Waiting for collector events…</pre></div>','')
     return page
+
+from laboratory import install
+install(globals())
+
+

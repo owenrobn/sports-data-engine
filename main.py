@@ -31,7 +31,8 @@ async def startup():
     if SUPABASE_KEY:
         asyncio.create_task(bootstrap_collectors())
         asyncio.create_task(collection_loop())
-        asyncio.create_task(historical_polymarket_loop())\n        asyncio.create_task(ingest_statsbomb_open())
+        asyncio.create_task(historical_polymarket_loop())
+        asyncio.create_task(ingest_statsbomb_open())
 
 SPORT_TERMS={
  "football":["soccer","football","premier league","champions league","la liga","serie a","bundesliga","ligue 1","mls","uefa","fifa"],

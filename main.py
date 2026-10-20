@@ -36,6 +36,7 @@ async def startup():
         asyncio.create_task(ingest_tennis_archive())
         asyncio.create_task(ingest_tennisvisuals_pbp())
         asyncio.create_task(build_event_market_timeline())
+        asyncio.create_task(link_sports_markets())
 
 SPORT_TERMS={
  "football":["soccer","football","premier league","champions league","la liga","serie a","bundesliga","ligue 1","mls","uefa","fifa"],
@@ -226,11 +227,18 @@ async def ingest_statsbomb_open():
 
 async def ingest_tennisvisuals_pbp():
     sid=await sport_id("tennis")
-    api="https://api.github.com/repos/TennisVisuals/tennis-match-data/contents/point-by-point"
+    api="https://api.github.com/repos/TennisVisuals/tennis-match-data/contents"
     async with httpx.AsyncClient(timeout=60,follow_redirects=True,headers={"User-Agent":"SDE/0.6"}) as client:
         try:
             listing=(await client.get(api)).json()
-            files=[x for x in listing if isinstance(x,dict) and str(x.get("name","")).endswith((".csv",".csv.gz"))][:20]
+            files=[]
+            for x in listing if isinstance(listing,list) else []:
+                if x.get("type")=="file" and str(x.get("name","")).endswith((".csv",".csv.gz")): files.append(x)
+                elif x.get("type")=="dir":
+                    sub=(await client.get(x.get("url"))).json()
+                    files.extend([y for y in sub if isinstance(y,dict) and y.get("type")=="file" and str(y.get("name","")).endswith((".csv",".csv.gz"))])
+            files=files[:20]
+            emit("backfill","TennisVisuals repository scanned",files=len(files))
             for info in files:
                 raw=await client.get(info["download_url"])
                 if raw.status_code!=200: continue
@@ -311,6 +319,44 @@ async def build_event_market_timeline():
             emit("timeline","Event-market timeline pass complete",links=len(links))
         except Exception as ex: emit("error","Timeline join failed",error=str(ex))
         await asyncio.sleep(1800)
+
+def name_tokens(text):
+    import re
+    stop={"vs","v","will","win","match","the","at","open","men","women"}
+    return {x for x in re.findall(r"[a-z0-9]+",str(text).lower()) if len(x)>2 and x not in stop}
+
+async def link_sports_markets():
+    while True:
+        try:
+            sports=await db("GET","sports",query="?select=id,slug") or []
+            smap={x["id"]:x["slug"] for x in sports}
+            events=await db("GET","events",query="?select=id,sport_id,name,starts_at,metadata&order=updated_at.desc&limit=500") or []
+            snaps=await db("GET","prediction_market_snapshots",query="?select=event_id,market_id,condition_id,payload,observed_at&order=id.desc&limit=3000") or []
+            markets={}
+            for s in snaps:
+                title=(s.get("payload") or {}).get("question") or (s.get("payload") or {}).get("market") or ""
+                markets.setdefault(s["market_id"],{"market_id":s["market_id"],"condition_id":s.get("condition_id"),"title":title,"pm_event_id":s.get("event_id")})
+            for ev in events:
+                sport=smap.get(ev.get("sport_id"))
+                if sport not in ("football","tennis"): continue
+                et=name_tokens(ev.get("name")); 
+                if len(et)<2: continue
+                best=None
+                for m in markets.values():
+                    mt=name_tokens(m["title"]); inter=len(et & mt); union=len(et | mt) or 1
+                    sim=inter/union
+                    if inter>=2 and (best is None or sim>best[0]): best=(sim,m)
+                if not best: continue
+                sim,m=best; conf=min(0.99,0.55+sim*0.44)
+                payload={"event_id":ev["id"],"polymarket_event_id":str(m.get("pm_event_id") or ""),"market_id":m["market_id"],"candidate_title":m["title"],"sport":sport,"event_start":ev.get("starts_at"),"name_similarity":sim,"confidence":conf,"status":"accepted" if conf>=0.78 else "candidate","metadata":{"method":"token_overlap_v1"}}
+                existing=await db("GET","market_link_candidates",query=f'?event_id=eq.{ev["id"]}&market_id=eq.{m["market_id"]}&select=id&limit=1')
+                if not existing: await db("POST","market_link_candidates",payload)
+                if conf>=0.78:
+                    linked=await db("GET","market_match_links",query=f'?event_id=eq.{ev["id"]}&market_id=eq.{m["market_id"]}&select=id&limit=1')
+                    if not linked: await db("POST","market_match_links",{"event_id":ev["id"],"market_id":m["market_id"],"condition_id":m.get("condition_id"),"market_question":m["title"],"market_type":"sports","confidence":conf,"method":"token_overlap_v1","metadata":{"sport":sport}})
+            emit("linker","Sports market matching pass complete",events=len(events),markets=len(markets))
+        except Exception as ex: emit("error","Sports market linker failed",error=str(ex))
+        await asyncio.sleep(900)
 
 async def bootstrap_collectors():
     await asyncio.sleep(3)

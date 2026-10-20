@@ -545,3 +545,6 @@ install_context(globals())
 
 from rae_requirements import install as install_rae
 install_rae(globals())
+
+from live_state import install as install_live
+install_live(globals())

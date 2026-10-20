@@ -248,9 +248,13 @@ async def package(event_id,as_of=None):
             if not players: person['missing_required_inputs'].append('verified_squad_profiles')
             person['missing_required_inputs'].append('complete_squad_player_minutes')
         participants.append(person)
+    from rae_requirements import contract
+    from laboratory import sid_for
+    sport='football' if str(event.get('sport_id'))==str(await sid_for('football')) else 'tennis'
+    requirements=contract(sport)
     missing=sorted({m for p in participants for m in p['missing_required_inputs']})
     if len(participants)!=2: missing.append('two_verified_pre_match_participants')
-    return {'schema_version':'1.0','event_id':str(event_id),'match':event['name'],'match_start':start.isoformat(),'decision_cutoff':cutoff.isoformat(),'generated_at':clock().isoformat(),'windows_days':[7,14],'maximum_performance_lookback_days':14,'future_information_excluded':True,'historical_reconstruction_policy':'Evidence retrieved later is excluded unless an earlier archived observation exists. No backdating.','engine_ready':not missing,'missing_required_inputs':missing,'participants':participants,'provider_access':provider_status(),'limitations':['Selected source coverage is not a complete player schedule.','No observation means unknown, never zero workload or injury-free.','This feed does not compute win probabilities or validate the PRD coefficients.']}
+    return {'schema_version':'1.0','event_id':str(event_id),'match':event['name'],'match_start':start.isoformat(),'decision_cutoff':cutoff.isoformat(),'generated_at':clock().isoformat(),'windows_days':[7,14],'maximum_performance_lookback_days':14,'future_information_excluded':True,'historical_reconstruction_policy':'Evidence retrieved later is excluded unless an earlier archived observation exists. No backdating.','context_ready':not missing,'engine_ready':False,'rae_requirements':requirements,'missing_required_inputs':missing+['full_rae_requirements_not_yet_satisfied'],'participants':participants,'provider_access':provider_status(),'limitations':['Selected source coverage is not a complete player schedule.','No observation means unknown, never zero workload or injury-free.','This feed does not compute win probabilities or validate the PRD coefficients.']}
 
 def provider_status():
     return {'espn_public':{'configured':True,'scope':'selected fixtures, results, profiles and rosters where public endpoints respond; no guaranteed SLA'},'thesportsdb':{'configured':True,'scope':'profile fallback; field and search coverage vary'},'api_tennis':{'configured':bool(os.getenv('API_TENNIS_KEY')),'scope':'recent tennis fixtures and match statistics'},'sportmonks':{'configured':bool(os.getenv('SPORTMONKS_API_TOKEN')),'scope':'football fixtures, player profiles, minutes and current absence reports'},'tracking_data':{'configured':False,'scope':'sprint speed and running distance require a licensed tracking feed'}}
@@ -317,7 +321,7 @@ def install(ctx):
     async def view(event_id:uuid.UUID):
         from laboratory import page,esc,table
         p=await package(event_id)
-        body='<p><a href="/context">Match list</a> · <a href="/data/context/'+str(event_id)+'">JSON for engines</a></p><p>Decision cutoff: '+esc(p['decision_cutoff'])+'</p><p>Engine ready: '+str(p['engine_ready'])+'</p><p>Missing inputs: '+esc(', '.join(p['missing_required_inputs']) or 'None')+'</p>'
+        body='<p><a href="/rae">Full PRD coverage</a> · <a href="/context">Match list</a> · <a href="/data/context/'+str(event_id)+'">JSON for engines</a></p><p>Decision cutoff: '+esc(p['decision_cutoff'])+'</p><p>Engine ready: '+str(p['engine_ready'])+'</p><p>Missing inputs: '+esc(', '.join(p['missing_required_inputs']) or 'None')+'</p>'
         for athlete in p['participants']:
             body+='<section><h2>'+esc(athlete['name'])+'</h2><p>Availability: '+esc(athlete['availability_status'])+'</p>'
             body+=table(['Profile field','Value','Source','Observed','Source updated'],[[esc(k),esc(json.dumps(r['value'])),esc(r['provider']),esc(r['observed_at']),esc(r.get('source_updated_at'))] for k,r in athlete['profiles'].items()])

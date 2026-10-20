@@ -542,3 +542,6 @@ install(globals())
 
 from context_feed import install as install_context
 install_context(globals())
+
+from rae_requirements import install as install_rae
+install_rae(globals())

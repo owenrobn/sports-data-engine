@@ -235,9 +235,9 @@ async def stream():
 async def data_overview():
     if not SUPABASE_KEY: return {"events":[],"markets":[],"books":[],"trades":[]}
     events=await db("GET","events",query="?select=id,name,starts_at,status,metadata&order=updated_at.desc&limit=20") or []
-    markets=await db("GET","prediction_market_snapshots",query="?select=event_id,market_id,outcome,price,volume,liquidity,observed_at,payload&order=observed_at.desc&limit=100") or []
-    books=await db("GET","prediction_market_books",query="?select=event_id,market_id,token_id,best_bid,best_ask,spread,observed_at&order=observed_at.desc&limit=30") or []
-    trades=await db("GET","prediction_market_trades",query="?select=event_id,market_id,trader,side,outcome,price,size,amount,executed_at&order=executed_at.desc&limit=50") or []
+    markets=await db("GET","prediction_market_snapshots",query="?select=event_id,market_id,outcome,price,volume,liquidity,observed_at&order=id.desc&limit=100") or []
+    books=await db("GET","prediction_market_books",query="?select=event_id,market_id,token_id,best_bid,best_ask,spread,observed_at&order=id.desc&limit=30") or []
+    trades=await db("GET","prediction_market_trades",query="?select=event_id,market_id,trader,side,outcome,price,size,amount,executed_at&order=id.desc&limit=50") or []
     return {"events":events,"markets":markets,"books":books,"trades":trades}
 
 @app.get("/data/market-summary")

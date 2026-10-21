@@ -405,7 +405,10 @@ async def run_engine(ctx):
         while True:
             n=await tracked('identity_repair','all',repair)
             await asyncio.sleep(60 if n else 900)
-    BACKGROUND.append(asyncio.create_task(repair_loop()))
+    # Repairs generate WAL too; opt in only after checking available disk.
+    from runtime_policy import flag
+    if flag('SDE_ENABLE_IDENTITY_REPAIR',False):
+        BACKGROUND.append(asyncio.create_task(repair_loop()))
     async def archives():
         while True:
             await asyncio.gather(tracked('statsbomb','football',ctx['ingest_statsbomb_open']),tracked('tennisvisuals_v2','tennis',tennis_points))
@@ -448,7 +451,12 @@ def install(ctx):
             await db('PATCH','sde_provider_runs',{'status':'interrupted','finished_at':stamp()},'?status=eq.running&details->>instance=eq.'+INSTANCE)
     original=next(r.endpoint for r in app.routes if getattr(r,'path',None)=='/dashboard')
     async def dashboard():
-        baseline=await original()
+        from runtime_policy import collection_paused
+        try: baseline=await original()
+        except Exception:
+            return page('Sports Data Engine — database unavailable','<section role="alert"><h2>Database recovery required</h2><p>The last verified database incident was a full disk. Live coverage cannot currently be verified. No zero counts or stale observations are presented as current results.</p><p>Collection is paused to protect retained history. Database capacity and write health must be restored before collection resumes.</p></section>')
+        if collection_paused():
+            baseline=baseline.replace('● connected','Collection paused — database disk recovery required')
         try: extra=await coverage_html()
         except Exception: extra='<section>Coverage temporarily unavailable. <a href="/operations">Operations</a> · <a href="/research/health">Provider health</a></section>'
         extra='<nav><a href="/rae">Full IMG-RAE requirements</a> · <a href="/context">Recent match evidence</a> · <a href="/research/football">Football</a> · <a href="/research/tennis">Tennis</a> · <a href="/research/health">Provider health and errors</a></nav>'+extra

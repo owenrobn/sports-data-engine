@@ -1,5 +1,10 @@
 # Sports Data Engine (SDE)
 
+## Database recovery hold (2026-10-20)
+Postgres logs reported `No space left on device` while writing WAL. The last readable database was 1586 MB, above the free allowance. `SDE_COLLECTION_PAUSED` defaults to true and centrally blocks application writes, including repair RPCs. Reads remain available when Postgres responds. The dashboard shows an explicit unavailable state when reads fail. No retained history is deleted.
+
+Restore database capacity and verify read/write health before setting `SDE_COLLECTION_PAUSED=0`. Identity repair is separately disabled by default; set `SDE_ENABLE_IDENTITY_REPAIR=1` only after checking disk/WAL headroom. It archives exact duplicate payloads and performs bounded transactions. The ten-minute GitHub schedule has exhibited multi-hour delays and does not guarantee awake hosting. A database scheduler ping cannot be installed while PostgreSQL refuses connections.
+
 Cloud-first, sport-agnostic data layer for Kreopoly Lens, IMG-RAE, Project LEDGER and Poly-robin.
 
 ## v0.3
@@ -77,3 +82,5 @@ Closed Gamma price snapshots are recorded only when token/outcome mapping, price
 Automatic recent price-history work is limited to six linked markets per sport/pass with a persisted round-robin cursor, a 14-day maximum query window and hourly samples. Minute-level historical data already stored is not resampled or deleted. Current match-state and executable-book collectors keep their existing cadence. Deep trade backfills are paused by default. Timeline recomputation is restricted to recent fixtures in free mode. The operations page exposes the effective runtime policy.
 
 This reduces resource use; it does **not** shrink the retained 1.5 GB history below the free database allowance, grant licensed source access, or guarantee continuous uptime on sleeping free hosting. A free archival design must preserve and verify recoverability before any historical records can be moved out of the query database. No historical deletion or paid upgrade is part of free mode.
+
+

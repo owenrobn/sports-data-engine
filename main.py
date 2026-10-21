@@ -15,6 +15,9 @@ def headers():
     return {"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}","Content-Type":"application/json","Prefer":"return=representation"}
 async def db(method,table,payload=None,query="",prefer=None):
     if not (SUPABASE_URL and SUPABASE_KEY): return None
+    from runtime_policy import collection_paused
+    if method not in ('GET','HEAD') and collection_paused():
+        raise RuntimeError('Collection paused for database disk recovery')
     identities={"football_match_events":"provider,event_id,provider_event_id","tennis_match_events":"provider,event_id,provider_event_id","prediction_market_snapshots":"ingest_key","prediction_market_trades":"ingest_key","prediction_market_books":"ingest_key","event_market_timeline":"ingest_key","backfill_checkpoints":"provider,stream,cursor_key"}
     if method=="POST" and table in identities and "on_conflict=" not in query:
         query+=("&" if query else "?")+"on_conflict="+identities[table]
@@ -570,3 +573,5 @@ async def close_shared_clients():
     if DB_CLIENT is not None: await DB_CLIENT.aclose()
     from context_feed import close_source_client
     await close_source_client()
+
+

@@ -1,8 +1,11 @@
 import os
 import unittest
 from unittest.mock import AsyncMock,patch
-from runtime_policy import policy
+from runtime_policy import policy,collection_paused
 class FreePolicy(unittest.TestCase):
+ def test_database_incident_holds_writes_until_explicit_resume(self):
+  with patch.dict(os.environ,{},clear=True): self.assertTrue(collection_paused())
+  with patch.dict(os.environ,{'SDE_COLLECTION_PAUSED':'0'},clear=True): self.assertFalse(collection_paused())
  def test_default_free_preserves_history_and_pauses_expansion(self):
   with patch.dict(os.environ,{},clear=True):
    p=policy();self.assertTrue(p['free_mode']);self.assertTrue(p['history_preserved']);self.assertFalse(p['archive_backfill_enabled']);self.assertFalse(p['deep_trade_backfill_enabled']);self.assertFalse(p['historical_fixture_expansion_enabled']);self.assertFalse(p['continuous_uptime_guaranteed'])
@@ -25,3 +28,5 @@ class RecentHistoryBudget(unittest.IsolatedAsyncioTestCase):
    self.assertEqual(fetch.await_count,6);trade.assert_not_awaited()
    for call in fetch.call_args_list:
     params=call.args[1];self.assertNotIn('interval',params);self.assertEqual(params['fidelity'],60);self.assertLessEqual(params['endTs']-params['startTs'],14*86400+1)
+
+

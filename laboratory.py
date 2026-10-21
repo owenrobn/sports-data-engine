@@ -452,6 +452,8 @@ def install(ctx):
     original=next(r.endpoint for r in app.routes if getattr(r,'path',None)=='/dashboard')
     async def dashboard():
         from runtime_policy import collection_paused
+        if collection_paused():
+            return page('Sports Data Engine — collection paused','<section role="alert"><h2>Database recovery required</h2><p>Collection is paused after a database full-disk incident. Retained history has not been deleted. Live coverage is unavailable until database capacity and write health are restored.</p></section>')
         try: baseline=await original()
         except Exception:
             return page('Sports Data Engine — database unavailable','<section role="alert"><h2>Database recovery required</h2><p>The last verified database incident was a full disk. Live coverage cannot currently be verified. No zero counts or stale observations are presented as current results.</p><p>Collection is paused to protect retained history. Database capacity and write health must be restored before collection resumes.</p></section>')

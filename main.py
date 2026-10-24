@@ -5,6 +5,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 import httpx
 
 app=FastAPI(title="Sports Data Engine",version="0.5.0")
+from archive_health import install as install_archive_health
+install_archive_health(app)
 SUPABASE_URL=os.getenv("SUPABASE_URL","").rstrip("/")
 SUPABASE_KEY=os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 mem_events=[]; mem_jobs={}
@@ -573,5 +575,4 @@ async def close_shared_clients():
     if DB_CLIENT is not None: await DB_CLIENT.aclose()
     from context_feed import close_source_client
     await close_source_client()
-
 

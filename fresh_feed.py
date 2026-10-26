@@ -131,11 +131,18 @@ async def poll(sport):
     count=sum(len(p['matches']) for p in state['packs'].values())
     if count>MAX_ROWS:
         state['archive']={'verified':False,'status':'row_budget_reached'};return
-    snapshot={'schema_version':1,'sport':sport,'archived_at':clock().isoformat(),'packs':state['packs']}
+    snapshot={'schema_version':1,'sport':sport,'archived_at':clock().isoformat(),'last_poll_at':state['last_poll_at'],'history_cursor':state['history_cursor'],'packs':state['packs']}
     async with ARCHIVE_LOCK:
         try: state['archive']=await asyncio.to_thread(persist,snapshot)
         except Exception as ex: state['archive']={'verified':False,'status':'persistence_failed','error_class':type(ex).__name__}
 
+
+def restore_state(sport,snapshot):
+    cursor=snapshot.get('history_cursor',1)
+    if type(cursor) is not int or not 1<=cursor<=14: raise ValueError('Invalid saved history cursor')
+    STATE[sport]['packs']=snapshot['packs'];STATE[sport]['history_cursor']=cursor
+    STATE[sport]['last_poll_at']=snapshot.get('last_poll_at')
+    STATE[sport]['archive']={'verified':True,'status':'restored_verified_snapshot','archived_at':snapshot['archived_at']}
 
 def output(sport):
     if sport not in LEAGUES: raise HTTPException(422,'Choose football or tennis')
@@ -194,8 +201,7 @@ def install(app):
         async def lane(sport):
             try:
                 snapshot=await asyncio.to_thread(hydrate,sport)
-                if snapshot:
-                    STATE[sport]['packs']=snapshot['packs'];STATE[sport]['archive']={'verified':True,'status':'restored_verified_snapshot','archived_at':snapshot['archived_at']}
+                if snapshot: restore_state(sport,snapshot)
             except Exception as ex: STATE[sport]['archive']={'verified':False,'status':'restore_unavailable','error_class':type(ex).__name__}
             while True:
                 try: await poll(sport)

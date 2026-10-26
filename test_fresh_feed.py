@@ -82,3 +82,12 @@ class SourcePresentation(unittest.TestCase):
   from fastapi import HTTPException
   with patch('fresh_feed.output',return_value={'matches':[{'id':'unknown','starts_at':None}]}):
    with self.assertRaises(HTTPException): f.match_package('unknown')
+
+class RestartProgress(unittest.TestCase):
+ def test_archive_restore_resumes_history_cursor_without_refreshing_observations(self):
+  old=copy.deepcopy(f.STATE['tennis']);observed=(clock()-timedelta(hours=1)).isoformat()
+  try:
+   snapshot={'history_cursor':8,'last_poll_at':observed,'archived_at':observed,'packs':{'p':{'requested_date':clock().date().isoformat(),'matches':[{'id':'a','observed_at':observed,'starts_at':None,'status':{}}]}}}
+   f.restore_state('tennis',snapshot)
+   self.assertEqual(f.STATE['tennis']['history_cursor'],8);self.assertEqual(f.STATE['tennis']['last_poll_at'],observed);self.assertFalse(f.output('tennis')['matches'][0]['retrieval_fresh'])
+  finally: f.STATE['tennis']=old

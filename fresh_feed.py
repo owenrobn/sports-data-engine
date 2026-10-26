@@ -153,6 +153,46 @@ async def enrich(sport,state):
             receipts[m['id']]={**receipts.get(m['id'],{}),'attempted_at':attempted,'last_error_class':type(ex).__name__}
 
 
+async def enrich_profiles(sport,state):
+    from context_feed import profile_records
+    profiles=state.setdefault('profiles',{});targets={};now=clock()
+    matches=[m for pack in state['packs'].values() for m in pack['matches']]
+    matches.sort(key=lambda m:abs(((date(m.get('starts_at')) or now)-now).total_seconds()))
+    for m in matches:
+        for p in m.get('participants',[]): targets.setdefault(m['league']+':'+p['source_id'],(m,p))
+    state['profiles']={k:v for k,v in profiles.items() if k in targets};profiles=state['profiles']
+    attempts=0
+    for key,(m,p) in targets.items():
+        old=profiles.get(key,{});checked=date(old.get('attempted_at'))
+        if checked and (now-checked).total_seconds()<21600: continue
+        if attempts>=4: break
+        attempts+=1;league=m['league'];pid=p['source_id'];attempted=clock().isoformat()
+        url=(f'https://site.web.api.espn.com/apis/common/v3/sports/tennis/{league}/athletes/{pid}' if sport=='tennis' else f'https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/teams/{pid}/roster')
+        try:
+            raw=await get_json(url);observed=clock().isoformat();rows=[]
+            if sport=='tennis':
+                athlete=raw.get('athlete') or raw
+                if str(athlete.get('id'))!=pid or norm(athlete.get('displayName') or athlete.get('fullName') or '')!=norm(p['name']): raise ValueError('Profile identity mismatch')
+                rows=profile_records(sport,key,p['name'],athlete,'espn',url,observed)
+            else:
+                team=raw.get('team') or {}
+                if str(team.get('id'))!=pid: raise ValueError('Roster team identity unverified')
+                def athletes(nodes):
+                    for node in nodes:
+                        children=node.get('items') or node.get('athletes')
+                        if isinstance(children,list): yield from athletes(children)
+                        else: yield node.get('athlete') or node
+                for athlete in athletes(raw.get('athletes') or []):
+                    if athlete.get('id') and (athlete.get('displayName') or athlete.get('fullName')):
+                        rows.extend(profile_records(sport,'espn:football:player:'+str(athlete['id']),athlete.get('displayName') or athlete['fullName'],athlete,'espn',url,observed))
+            receipt={'source_url':url,'observed_at':observed,'attempted_at':attempted,'source_updated_at':None,'records':rows,'status':'fields_observed' if rows else 'fields_not_supplied','fitness_assessment':False}
+            if len(canonical(receipt))>64*1024: raise ValueError('Profile receipt exceeds budget')
+            profiles[key]=receipt
+            while len(canonical(profiles))>512*1024:
+                del profiles[min(profiles,key=lambda k:profiles[k].get('observed_at') or profiles[k].get('attempted_at',''))]
+        except Exception as ex: profiles[key]={**old,'attempted_at':attempted,'last_error_class':type(ex).__name__}
+
+
 async def poll(sport):
     state=STATE[sport];today=clock().date();dates=[today,today+timedelta(days=1),today-timedelta(days=state['history_cursor'])]
     errors=[];sem=asyncio.Semaphore(3)
@@ -179,7 +219,8 @@ async def poll(sport):
     if count>MAX_ROWS:
         state['archive']={'verified':False,'status':'row_budget_reached'};return
     await enrich(sport,state)
-    snapshot={'schema_version':1,'details':state.get('details',{}),'sport':sport,'archived_at':clock().isoformat(),'last_poll_at':state['last_poll_at'],'history_cursor':state['history_cursor'],'packs':state['packs']}
+    await enrich_profiles(sport,state)
+    snapshot={'schema_version':1,'details':state.get('details',{}),'profiles':state.get('profiles',{}),'sport':sport,'archived_at':clock().isoformat(),'last_poll_at':state['last_poll_at'],'history_cursor':state['history_cursor'],'packs':state['packs']}
     async with ARCHIVE_LOCK:
         try: state['archive']=await asyncio.to_thread(persist,snapshot)
         except Exception as ex: state['archive']={'verified':False,'status':'persistence_failed','error_class':type(ex).__name__}
@@ -188,7 +229,7 @@ async def poll(sport):
 def restore_state(sport,snapshot):
     cursor=snapshot.get('history_cursor',1)
     if type(cursor) is not int or not 1<=cursor<=14: raise ValueError('Invalid saved history cursor')
-    STATE[sport]['details']=snapshot.get('details',{});STATE[sport]['packs']=snapshot['packs'];STATE[sport]['history_cursor']=cursor
+    STATE[sport]['profiles']=snapshot.get('profiles',{});STATE[sport]['details']=snapshot.get('details',{});STATE[sport]['packs']=snapshot['packs'];STATE[sport]['history_cursor']=cursor
     STATE[sport]['last_poll_at']=snapshot.get('last_poll_at')
     STATE[sport]['archive']={'verified':True,'status':'restored_verified_snapshot','archived_at':snapshot['archived_at']}
 
@@ -203,7 +244,7 @@ def output(sport):
         t=date(r.get('observed_at'));age=(now-t).total_seconds() if t else None
         rows.append({**r,'detail_receipt':state.get('details',{}).get(r['id']),'retrieval_age_seconds':round(age,1) if age is not None else None,'retrieval_fresh':age is not None and 0<=age<=180})
     rows.sort(key=lambda r:(0 if (r['status'].get('type') or {}).get('state')=='in' else 1,abs(((date(r.get('starts_at')) or now)-now).total_seconds())))
-    return {'sport':sport,'generated_at':now.isoformat(),'collection_mode':'private_archive_during_database_recovery','engine_ready':False,'database_collection_paused':True,'last_poll_at':state['last_poll_at'],'matches_observed':len(rows),'upstream_errors':state['errors'],'archive':state['archive'],'matches':rows,'coverage':{'selected_leagues':LEAGUES[sport],'history_days_fetched':len({p['requested_date'] for p in state['packs'].values() if p['requested_date']<now.date().isoformat()}),'target_history_days':14,'complete_schedule_verified':False},'limitations':['This independent lane does not restore the full database or its historical archive.','Recent retrieval does not establish provider latency.','Profiles, availability, minutes, market benchmark and full PRD inputs remain incomplete.','Free hosting can sleep. Memory-only observations are labelled when private persistence fails.']}
+    return {'sport':sport,'generated_at':now.isoformat(),'collection_mode':'private_archive_during_database_recovery','engine_ready':False,'database_collection_paused':True,'last_poll_at':state['last_poll_at'],'matches_observed':len(rows),'profiles':state.get('profiles',{}),'upstream_errors':state['errors'],'archive':state['archive'],'matches':rows,'coverage':{'selected_leagues':LEAGUES[sport],'history_days_fetched':len({p['requested_date'] for p in state['packs'].values() if p['requested_date']<now.date().isoformat()}),'target_history_days':14,'complete_schedule_verified':False},'limitations':['This independent lane does not restore the full database or its historical archive.','Recent retrieval does not establish provider latency.','Profiles, availability, minutes, market benchmark and full PRD inputs remain incomplete.','Free hosting can sleep. Memory-only observations are labelled when private persistence fails.']}
 
 def match_package(event_id):
     for sport in LEAGUES:
@@ -220,7 +261,7 @@ def match_package(event_id):
                 person=next((x for x in m['participants'] if x['source_id']==p['source_id']),None)
                 if person: prior.append({'event_id':m['id'],'name':m['name'],'starts_at':m['starts_at'],'observed_at':m['observed_at'],'source_url':m['source_url'],'participant':person})
             windows={str(days):{'matches_observed':sum(date(m['starts_at'])>=cutoff-timedelta(days=days) for m in prior),'evidence':[m for m in prior if date(m['starts_at'])>=cutoff-timedelta(days=days)],'minutes':None,'schedule_complete':False} for days in (7,14)}
-            participants.append({'name':p['name'],'source_id':p['source_id'],'windows':windows,'profiles':None,'availability':None,'rest_hours':None})
+            participants.append({'name':p['name'],'source_id':p['source_id'],'windows':windows,'profiles':data.get('profiles',{}).get(target['league']+':'+p['source_id']) if date(data.get('profiles',{}).get(target['league']+':'+p['source_id'],{}).get('observed_at')) and date(data['profiles'][target['league']+':'+p['source_id']]['observed_at'])<=cutoff else None,'availability':None,'rest_hours':None})
         return {'match':{k:v for k,v in target.items() if k!='detail_receipt'},'detail_receipt':target.get('detail_receipt') if date((target.get('detail_receipt') or {}).get('observed_at')) and date(target['detail_receipt']['observed_at'])<=cutoff else None,'pre_match_cutoff':cutoff.isoformat(),'participants':participants,'engine_ready':False,'source_coverage':data['coverage'],'archive':data['archive'],'missing_inputs':['verified_profiles','fresh_availability','complete_minutes','independent_fixture_verification','complete_live_model_inputs','synchronized_market_benchmark','private_account_integration'],'storage_mode':data['collection_mode']}
     raise HTTPException(404,'Match not yet observed in the independent feed')
 
@@ -229,9 +270,19 @@ def install(app):
     async def data(sport:str='tennis'): return output(sport)
     @app.get('/data/fresh/match/{event_id}')
     async def detail(event_id:uuid.UUID): return match_package(event_id)
+    @app.get('/fresh/players',response_class=HTMLResponse)
+    async def players(sport:str='tennis'):
+        data=output(sport);rows=[]
+        for receipt in data['profiles'].values():
+            for r in receipt.get('records',[]):
+                rows.append([esc(r['entity_name']),esc(r['metric']),esc(r['value']),esc(r.get('unit')),esc(r['observed_at']),esc(r['source_url'])])
+        body='<p><a href="/fresh?sport='+sport+'">Matches</a> · <a href="?sport=football">Football profiles</a> · <a href="?sport=tennis">Tennis profiles</a></p><p>Identity-checked source measurements. Source update time is unknown. These are not fitness or injury assessments. Missing fields remain unknown; collection is bounded and coverage is partial.</p>'
+        body+=table(['Player','Field','Value','Unit','Retrieved','Source'],rows)
+        return page(sport.title()+' · Player profile evidence',body)
     @app.get('/fresh',response_class=HTMLResponse)
     async def view(sport:str='tennis'):
         p=output(sport);a=p['archive'];body='<p><a href="?sport=football">Football</a> · <a href="?sport=tennis">Tennis</a> · <a href="/data/fresh?sport='+sport+'">Evidence JSON</a> · <a href="/dashboard">Recovery status</a></p><p>Database recovery is ongoing. This independent lane collects selected fixtures and statistics into the connected private archive. It is not full IMG-RAE readiness.</p>'
+        body+='<p><a href="/fresh/players?sport='+sport+'">Collected player profiles</a></p>'
         body+='<p>Last scan: '+esc(p['last_poll_at'])+'. Archive: '+esc(a['status'])+'. Read-back verified: '+esc(a['verified'])+'. Prior dates fetched: '+esc(p['coverage']['history_days_fetched'])+'/14.</p>'
         body+=table(['Match','Source start (UTC)','State','Score','Retrieved','Fresh','Details','Evidence'],[[esc(m['name']),esc(m['starts_at']),esc((m['status'].get('type') or {}).get('description')),esc(score_display(m)),esc(m['observed_at']),esc(m['retrieval_fresh']),esc('Collected' if (m.get('detail_receipt') or {}).get('payload') else 'Pending'),('<a href="/fresh/match/'+m['id']+'">7/14-day input package</a>' if m['starts_at'] else 'Start time unverified')] for m in p['matches']])
         if p['upstream_errors']: body+='<p>Source failures: '+esc(json.dumps(p['upstream_errors']))+'</p>'

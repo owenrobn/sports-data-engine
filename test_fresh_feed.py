@@ -122,3 +122,18 @@ class IndependentDetails(unittest.IsolatedAsyncioTestCase):
   state={'packs':{'p':{'matches':[m]}}}
   with patch('fresh_feed.get_json',AsyncMock(return_value={'rosters':['x'*140000]})): await f.enrich('football',state)
   self.assertNotIn('payload',state['details']['a'])
+
+class IndependentProfiles(unittest.IsolatedAsyncioTestCase):
+ async def test_identity_verified_fields_are_collected_for_both_sports(self):
+  athlete={'id':'1','displayName':'Player','displayHeight':'180 cm','displayWeight':'75 kg'}
+  for sport,league,pid,name,raw in [('tennis','atp','1','Player',{'athlete':athlete}),('football','eng.1','2','Team',{'team':{'id':'2'},'athletes':[athlete]})]:
+   state={'packs':{'p':{'matches':[{'league':league,'participants':[{'source_id':pid,'name':name}]}]}}}
+   with patch('fresh_feed.get_json',AsyncMock(return_value=raw)) as source:
+    await f.enrich_profiles(sport,state);await f.enrich_profiles(sport,state)
+    self.assertEqual(source.await_count,1)
+   receipt=state['profiles'][league+':'+pid];values={r['metric']:r['value'] for r in receipt['records']}
+   self.assertEqual(values['height_cm'],180);self.assertEqual(values['weight_kg'],75);self.assertFalse(receipt['fitness_assessment'])
+ async def test_wrong_profile_identity_is_never_attached(self):
+  state={'packs':{'p':{'matches':[{'league':'atp','participants':[{'source_id':'1','name':'Player'}]}]}}}
+  with patch('fresh_feed.get_json',AsyncMock(return_value={'athlete':{'id':'9','displayName':'Player','displayHeight':'180 cm'}})): await f.enrich_profiles('tennis',state)
+  self.assertNotIn('records',state['profiles']['atp:1'])

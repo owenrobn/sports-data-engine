@@ -100,3 +100,25 @@ class ArchiveRequestBudget(unittest.TestCase):
    self.assertEqual(wrapper.size(),3);self.assertEqual(wrapper.size(),3);self.assertEqual(scans.call_count,1)
    with patch('fresh_feed.clock',return_value=usage['checked_at']+timedelta(hours=2)): self.assertEqual(wrapper.size(),3)
    self.assertEqual(scans.call_count,2)
+
+class IndependentDetails(unittest.IsolatedAsyncioTestCase):
+ async def test_both_sports_collect_and_cache_timestamped_receipts(self):
+  for sport,league in [('football','eng.1'),('tennis','atp')]:
+   m={'id':'a','league':league,'provider_match_id':'123','provider_event_id':'456','starts_at':clock().isoformat(),'status':{}}
+   state={'packs':{'p':{'matches':[m]}}}
+   raw={'rosters':[{'athlete':{'height':180}}]} if sport=='football' else {'surface':'clay','competitors':[]}
+   with patch('fresh_feed.get_json',AsyncMock(return_value=raw)) as source:
+    await f.enrich(sport,state);await f.enrich(sport,state)
+    self.assertEqual(source.await_count,1)
+   receipt=state['details']['a'];self.assertEqual(receipt['payload'],raw);self.assertIsNone(receipt['source_updated_at']);self.assertFalse(receipt['independent_fixture_verification'])
+ async def test_detail_failure_preserves_original_observation(self):
+  old=(clock()-timedelta(days=1)).isoformat()
+  m={'id':'a','league':'eng.1','provider_match_id':'123','status':{}}
+  state={'packs':{'p':{'matches':[m]}},'details':{'a':{'observed_at':old,'payload':{'rosters':[]}}}}
+  with patch('fresh_feed.get_json',AsyncMock(side_effect=RuntimeError('source failed'))): await f.enrich('football',state)
+  self.assertEqual(state['details']['a']['observed_at'],old);self.assertEqual(state['details']['a']['last_error_class'],'RuntimeError')
+ async def test_oversized_detail_is_rejected_without_blocking_lane(self):
+  m={'id':'a','league':'eng.1','provider_match_id':'123','status':{}}
+  state={'packs':{'p':{'matches':[m]}}}
+  with patch('fresh_feed.get_json',AsyncMock(return_value={'rosters':['x'*140000]})): await f.enrich('football',state)
+  self.assertNotIn('payload',state['details']['a'])

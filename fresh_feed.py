@@ -220,7 +220,10 @@ async def poll(sport):
         state['archive']={'verified':False,'status':'row_budget_reached'};return
     await enrich(sport,state)
     await enrich_profiles(sport,state)
-    snapshot={'schema_version':1,'details':state.get('details',{}),'profiles':state.get('profiles',{}),'sport':sport,'archived_at':clock().isoformat(),'last_poll_at':state['last_poll_at'],'history_cursor':state['history_cursor'],'packs':state['packs']}
+    from fresh_markets import collect
+    try: await collect(sport,state)
+    except Exception as ex: state['market_error']={'error_class':type(ex).__name__,'observed_at':clock().isoformat()}
+    snapshot={'schema_version':1,'details':state.get('details',{}),'profiles':state.get('profiles',{}),'markets':state.get('markets',{}),'sport':sport,'archived_at':clock().isoformat(),'last_poll_at':state['last_poll_at'],'history_cursor':state['history_cursor'],'packs':state['packs']}
     async with ARCHIVE_LOCK:
         try: state['archive']=await asyncio.to_thread(persist,snapshot)
         except Exception as ex: state['archive']={'verified':False,'status':'persistence_failed','error_class':type(ex).__name__}
@@ -229,7 +232,7 @@ async def poll(sport):
 def restore_state(sport,snapshot):
     cursor=snapshot.get('history_cursor',1)
     if type(cursor) is not int or not 1<=cursor<=14: raise ValueError('Invalid saved history cursor')
-    STATE[sport]['profiles']=snapshot.get('profiles',{});STATE[sport]['details']=snapshot.get('details',{});STATE[sport]['packs']=snapshot['packs'];STATE[sport]['history_cursor']=cursor
+    STATE[sport]['markets']=snapshot.get('markets',{});STATE[sport]['profiles']=snapshot.get('profiles',{});STATE[sport]['details']=snapshot.get('details',{});STATE[sport]['packs']=snapshot['packs'];STATE[sport]['history_cursor']=cursor
     STATE[sport]['last_poll_at']=snapshot.get('last_poll_at')
     STATE[sport]['archive']={'verified':True,'status':'restored_verified_snapshot','archived_at':snapshot['archived_at']}
 
@@ -244,15 +247,15 @@ def output(sport):
         t=date(r.get('observed_at'));age=(now-t).total_seconds() if t else None
         rows.append({**r,'detail_receipt':state.get('details',{}).get(r['id']),'retrieval_age_seconds':round(age,1) if age is not None else None,'retrieval_fresh':age is not None and 0<=age<=180})
     rows.sort(key=lambda r:(0 if (r['status'].get('type') or {}).get('state')=='in' else 1,abs(((date(r.get('starts_at')) or now)-now).total_seconds())))
-    return {'sport':sport,'generated_at':now.isoformat(),'collection_mode':'private_archive_during_database_recovery','engine_ready':False,'database_collection_paused':True,'last_poll_at':state['last_poll_at'],'matches_observed':len(rows),'profiles':state.get('profiles',{}),'upstream_errors':state['errors'],'archive':state['archive'],'matches':rows,'coverage':{'selected_leagues':LEAGUES[sport],'history_days_fetched':len({p['requested_date'] for p in state['packs'].values() if p['requested_date']<now.date().isoformat()}),'target_history_days':14,'complete_schedule_verified':False},'limitations':['This independent lane does not restore the full database or its historical archive.','Recent retrieval does not establish provider latency.','Profiles, availability, minutes, market benchmark and full PRD inputs remain incomplete.','Free hosting can sleep. Memory-only observations are labelled when private persistence fails.']}
+    return {'sport':sport,'generated_at':now.isoformat(),'collection_mode':'private_archive_during_database_recovery','engine_ready':False,'database_collection_paused':True,'last_poll_at':state['last_poll_at'],'matches_observed':len(rows),'market_collection_error':state.get('market_error'),'market_receipts':state.get('markets',{}).get('receipts',{}),'market_searches':state.get('markets',{}).get('searches',{}),'profiles':state.get('profiles',{}),'upstream_errors':state['errors'],'archive':state['archive'],'matches':rows,'coverage':{'selected_leagues':LEAGUES[sport],'history_days_fetched':len({p['requested_date'] for p in state['packs'].values() if p['requested_date']<now.date().isoformat()}),'target_history_days':14,'complete_schedule_verified':False},'limitations':['This independent lane does not restore the full database or its historical archive.','Recent retrieval does not establish provider latency.','Profiles, availability, minutes, market benchmark and full PRD inputs remain incomplete.','Free hosting can sleep. Memory-only observations are labelled when private persistence fails.']}
 
-def match_package(event_id):
+def match_package(event_id,decision=None):
     for sport in LEAGUES:
         data=output(sport);target=next((m for m in data['matches'] if m['id']==str(event_id)),None)
         if not target: continue
         start=date(target.get('starts_at'))
         if start is None: raise HTTPException(422,'Verified timezone-aware match start required for pre-match windows')
-        cutoff=min(clock(),start);participants=[]
+        cutoff=min(decision or clock(),start);participants=[]
         for p in target['participants']:
             prior=[]
             for m in data['matches']:
@@ -262,7 +265,7 @@ def match_package(event_id):
                 if person: prior.append({'event_id':m['id'],'name':m['name'],'starts_at':m['starts_at'],'observed_at':m['observed_at'],'source_url':m['source_url'],'participant':person})
             windows={str(days):{'matches_observed':sum(date(m['starts_at'])>=cutoff-timedelta(days=days) for m in prior),'evidence':[m for m in prior if date(m['starts_at'])>=cutoff-timedelta(days=days)],'minutes':None,'schedule_complete':False} for days in (7,14)}
             participants.append({'name':p['name'],'source_id':p['source_id'],'windows':windows,'profiles':data.get('profiles',{}).get(target['league']+':'+p['source_id']) if date(data.get('profiles',{}).get(target['league']+':'+p['source_id'],{}).get('observed_at')) and date(data['profiles'][target['league']+':'+p['source_id']]['observed_at'])<=cutoff else None,'availability':None,'rest_hours':None})
-        return {'match':{k:v for k,v in target.items() if k!='detail_receipt'},'detail_receipt':target.get('detail_receipt') if date((target.get('detail_receipt') or {}).get('observed_at')) and date(target['detail_receipt']['observed_at'])<=cutoff else None,'pre_match_cutoff':cutoff.isoformat(),'participants':participants,'engine_ready':False,'source_coverage':data['coverage'],'archive':data['archive'],'missing_inputs':['verified_profiles','fresh_availability','complete_minutes','independent_fixture_verification','complete_live_model_inputs','synchronized_market_benchmark','private_account_integration'],'storage_mode':data['collection_mode']}
+        return {'match':{k:v for k,v in target.items() if k in ('id','name','sport','league','starts_at','source_date','provider_match_id','provider_event_id','source_url')},'detail_receipt':target.get('detail_receipt') if date((target.get('detail_receipt') or {}).get('observed_at')) and date(target['detail_receipt']['observed_at'])<=cutoff else None,'pre_match_cutoff':cutoff.isoformat(),'participants':participants,'engine_ready':False,'source_coverage':data['coverage'],'archive':data['archive'],'missing_inputs':['verified_profiles','fresh_availability','complete_minutes','independent_fixture_verification','complete_live_model_inputs','synchronized_market_benchmark','private_account_integration'],'storage_mode':data['collection_mode']}
     raise HTTPException(404,'Match not yet observed in the independent feed')
 
 def install(app):
@@ -289,7 +292,7 @@ def install(app):
         return page(sport.title()+' · Fresh source evidence',body)
     @app.get('/fresh/match/{event_id}',response_class=HTMLResponse)
     async def match_view(event_id:uuid.UUID):
-        p=match_package(event_id);body='<p><a href="/fresh?sport='+p['match']['sport']+'">Match list</a> · <a href="/data/fresh/match/'+str(event_id)+'">Evidence JSON</a></p><p>Engine ready: False. Missing inputs: '+esc(', '.join(p['missing_inputs']))+'</p>'
+        p=match_package(event_id);body='<p><a href="/engine/'+str(event_id)+'">Unified engine evidence</a> · <a href="/ledger/'+str(event_id)+'">LEDGER audit</a> · <a href="/fresh?sport='+p['match']['sport']+'">Match list</a> · <a href="/data/fresh/match/'+str(event_id)+'">Evidence JSON</a></p><p>Engine ready: False. Missing inputs: '+esc(', '.join(p['missing_inputs']))+'</p>'
         body+=table(['Participant','7-day matches observed','14-day matches observed','Availability','Minutes'],[[esc(x['name']),x['windows']['7']['matches_observed'],x['windows']['14']['matches_observed'],'Unknown','Unknown'] for x in p['participants']])
         body+='<details><summary>Source evidence</summary><pre>'+esc(json.dumps(p,indent=2))+'</pre></details>'
         return page(p['match']['name']+' · Independent evidence package',body)

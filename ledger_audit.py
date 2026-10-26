@@ -52,7 +52,11 @@ def capture_audit(captures,books,start,as_of):
             matching=[b for b in books if b.get('market_id')==payload.get('market_id') and str(b.get('token_id'))==token and date(b.get('observed_at')) and begin<=date(b['observed_at'])<=finish]
             if not matching: break
             from engine_delivery import book_quality
-            b=max(matching,key=lambda b:date(b['observed_at']));quotes.append(book_quality(b,finish))
+            b=max(matching,key=lambda b:date(b['observed_at']));q=book_quality(b,finish)
+            if b.get('provider_timestamp_required'):
+                source_time=date(b.get('provider_event_time'));q['source_fresh']=source_time is not None and 0<=(finish-source_time).total_seconds()<=120
+                q['usable']=q['usable'] and q['source_fresh']
+            quotes.append(q)
         times=[date(q['observed_at']) for q in quotes]
         sync=(max(times)-min(times)).total_seconds() if times else None
         usable=len(quotes)==len(tokens) and all(q['usable'] for q in quotes) and sync is not None and sync<=5
@@ -101,6 +105,9 @@ async def collect(sport):
     return total
 
 async def report(event_id,as_of=None,private=False):
+    if collection_paused():
+        from fresh_engine import ledger
+        return ledger(event_id,as_of,private)
     cutoff=date(as_of) if as_of else clock()
     if not cutoff or cutoff>clock(): raise HTTPException(422,'Use a timezone-aware as_of no later than now')
     events=await get('events',id='eq.'+str(event_id),limit=1)

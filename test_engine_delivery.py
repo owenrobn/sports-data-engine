@@ -40,7 +40,7 @@ class DeliveryIntegration(unittest.IsolatedAsyncioTestCase):
    context={'match':'Alpha vs Beta','decision_cutoff':T.isoformat(),'missing_required_inputs':['fresh_availability_confirmation'],'rae_requirements':{'sport':sport}}
    live={'sport':sport,'snapshot':None}
    engine_delivery.CTX['db']=AsyncMock(return_value=[])
-   with patch('context_feed.package',AsyncMock(return_value=context)),patch('live_state.package',AsyncMock(return_value=live)):
+   with patch('runtime_policy.collection_paused',return_value=False),patch('context_feed.package',AsyncMock(return_value=context)),patch('live_state.package',AsyncMock(return_value=live)):
     out=await engine_delivery.envelope('00000000-0000-0000-0000-000000000001',T.isoformat())
    self.assertFalse(out['engine_ready']);self.assertEqual(out['sport'],sport);self.assertIsNone(out['private_account_data']);self.assertIn('fresh_live_snapshot',out['blockers']);self.assertIn('verified_market_links_and_executable_books',out['blockers'])
  async def test_future_decision_rejected(self):

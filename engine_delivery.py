@@ -72,6 +72,10 @@ def live_fields(sport,state):
 async def get(table,**q): return await CTX['db']('GET',table,query='?'+urlencode(q)) or []
 
 async def envelope(event_id,as_of=None):
+    from runtime_policy import collection_paused
+    if collection_paused():
+        from fresh_engine import envelope as archived
+        return archived(event_id,as_of)
     from context_feed import package as context_package
     from live_state import package as live_package
     decision=date(as_of) if as_of else clock()
@@ -134,7 +138,7 @@ def install(ctx):
     @app.get('/engine/{event_id}',response_class=HTMLResponse)
     async def view(event_id:uuid.UUID):
         p=await envelope(event_id)
-        body='<p><a href="/context?sport='+p['sport']+'">Match list</a> · <a href="/data/engine/'+str(event_id)+'">Combined engine JSON</a> · <a href="/ledger/'+str(event_id)+'">LEDGER audit</a> · <a href="/operations">Operations</a></p><p>Decision time: '+esc(p['decision_time'])+'. Engine ready: False.</p>'
+        body='<p><a href="/fresh?sport='+p['sport']+'">Match list</a> · <a href="/data/engine/'+str(event_id)+'">Combined engine JSON</a> · <a href="/ledger/'+str(event_id)+'">LEDGER audit</a> · <a href="/operations">Operations</a></p><p>Decision time: '+esc(p['decision_time'])+'. Engine ready: False.</p>'
         body+=table(['Missing or unverified input'],[[esc(x)] for x in p['blockers']])
         body+='<details><summary>All evidence and receipts</summary><pre>'+esc(json.dumps(p,indent=2))+'</pre></details>'
         return page(p['match']+' · Unified SDE evidence',body)

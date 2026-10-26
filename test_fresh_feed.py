@@ -137,3 +137,11 @@ class IndependentProfiles(unittest.IsolatedAsyncioTestCase):
   state={'packs':{'p':{'matches':[{'league':'atp','participants':[{'source_id':'1','name':'Player'}]}]}}}
   with patch('fresh_feed.get_json',AsyncMock(return_value={'athlete':{'id':'9','displayName':'Player','displayHeight':'180 cm'}})): await f.enrich_profiles('tennis',state)
   self.assertNotIn('records',state['profiles']['atp:1'])
+
+class DecisionTimeIsolation(unittest.TestCase):
+ def test_after_start_details_and_profiles_are_excluded_from_prematch_package(self):
+  start=(clock()-timedelta(hours=1)).isoformat();now=clock().isoformat()
+  m={'id':'a','status':{},'sport':'tennis','league':'atp','starts_at':start,'participants':[{'source_id':'1','name':'Player'}],'detail_receipt':{'observed_at':now,'payload':{'situation':{'server':'1'}}}}
+  data={'matches':[m],'profiles':{'atp:1':{'observed_at':now,'records':[]}},'coverage':{},'archive':{},'collection_mode':'archive'}
+  with patch('fresh_feed.output',return_value=data): result=f.match_package('a')
+  self.assertIsNone(result['detail_receipt']);self.assertNotIn('detail_receipt',result['match']);self.assertIsNone(result['participants'][0]['profiles'])

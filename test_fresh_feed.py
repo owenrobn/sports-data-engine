@@ -68,3 +68,17 @@ class RecoveryStartup(unittest.TestCase):
     r=client.get('/health');self.assertEqual(r.status_code,200);self.assertTrue(r.json()['database_collection_paused']);self.assertFalse(r.json()['database_verified'])
     self.assertEqual(client.get('/fresh?sport=football').status_code,200);self.assertEqual(client.get('/fresh?sport=tennis').status_code,200)
    database.assert_not_awaited()
+
+class SourcePresentation(unittest.TestCase):
+ def test_set_games_are_displayed_without_inventing_match_score(self):
+  m={'sport':'tennis','status':{'type':{'state':'in'}},'participants':[{'score':None,'sets':[{'value':4},{'value':1}]},{'score':None,'sets':[{'value':6},{'value':0}]}]}
+  self.assertEqual(f.score_display(m),'4 – 6 | 1 – 0 (set games)')
+  m['status']['type']['state']='pre';self.assertEqual(f.score_display(m),'Not started')
+ def test_duplicate_source_queries_do_not_multiply_archive_rows(self):
+  m={'id':'a','observed_at':'2026-10-26T10:00:00Z'};n=dict(m,observed_at='2026-10-26T10:01:00Z')
+  out=f.compact_packs({'first':{'matches':[m]},'second':{'matches':[n]}})
+  self.assertEqual(sum(len(p['matches']) for p in out.values()),1);self.assertEqual(out['first']['source_matches_returned'],1);self.assertEqual(out['second']['matches'],[n])
+ def test_unverified_start_does_not_produce_pre_match_windows(self):
+  from fastapi import HTTPException
+  with patch('fresh_feed.output',return_value={'matches':[{'id':'unknown','starts_at':None}]}):
+   with self.assertRaises(HTTPException): f.match_package('unknown')

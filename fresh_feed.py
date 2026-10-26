@@ -83,6 +83,29 @@ def hydrate(sport):
         return None
     finally: store.client.close()
 
+def compact_packs(packs):
+    owners={}
+    for key,pack in packs.items():
+        for m in pack['matches']:
+            candidate=(m['observed_at'],key)
+            if m['id'] not in owners or candidate>owners[m['id']]: owners[m['id']]=candidate
+    return {key:{**pack,'source_matches_returned':pack.get('source_matches_returned',len(pack['matches'])),'matches':[m for m in pack['matches'] if owners[m['id']][1]==key]} for key,pack in packs.items()}
+
+def score_display(match):
+    if (match.get('status',{}).get('type') or {}).get('state')=='pre': return 'Not started'
+    p=match.get('participants') or []
+    if len(p)!=2: return 'Unknown'
+    if all(x.get('score') is not None for x in p): return ' – '.join(str(x['score']) for x in p)
+    sets=[x.get('sets') for x in p]
+    if match.get('sport')=='tennis' and all(isinstance(x,list) and x for x in sets):
+        games=[]
+        for a,b in zip(*sets):
+            av=a.get('displayValue') if a.get('displayValue') is not None else a.get('value')
+            bv=b.get('displayValue') if b.get('displayValue') is not None else b.get('value')
+            games.append(str(av if av is not None else '?')+' – '+str(bv if bv is not None else '?'))
+        return ' | '.join(games)+' (set games)'
+    return 'Unknown'
+
 async def poll(sport):
     state=STATE[sport];today=clock().date();dates=[today,today+timedelta(days=1),today-timedelta(days=state['history_cursor'])]
     errors=[];sem=asyncio.Semaphore(3)
@@ -104,6 +127,7 @@ async def poll(sport):
     state['last_poll_at']=clock().isoformat();state['errors']=errors;state['history_cursor']=state['history_cursor']%14+1
     low=(today-timedelta(days=14)).isoformat();high=(today+timedelta(days=2)).isoformat()
     state['packs']={k:p for k,p in state['packs'].items() if low<=p['requested_date']<=high}
+    state['packs']=compact_packs(state['packs'])
     count=sum(len(p['matches']) for p in state['packs'].values())
     if count>MAX_ROWS:
         state['archive']={'verified':False,'status':'row_budget_reached'};return
@@ -130,7 +154,9 @@ def match_package(event_id):
     for sport in LEAGUES:
         data=output(sport);target=next((m for m in data['matches'] if m['id']==str(event_id)),None)
         if not target: continue
-        cutoff=min(clock(),date(target.get('starts_at')) or clock());participants=[]
+        start=date(target.get('starts_at'))
+        if start is None: raise HTTPException(422,'Verified timezone-aware match start required for pre-match windows')
+        cutoff=min(clock(),start);participants=[]
         for p in target['participants']:
             prior=[]
             for m in data['matches']:
@@ -152,7 +178,7 @@ def install(app):
     async def view(sport:str='tennis'):
         p=output(sport);a=p['archive'];body='<p><a href="?sport=football">Football</a> · <a href="?sport=tennis">Tennis</a> · <a href="/data/fresh?sport='+sport+'">Evidence JSON</a> · <a href="/dashboard">Recovery status</a></p><p>Database recovery is ongoing. This independent lane collects selected fixtures and statistics into the connected private archive. It is not full IMG-RAE readiness.</p>'
         body+='<p>Last scan: '+esc(p['last_poll_at'])+'. Archive: '+esc(a['status'])+'. Read-back verified: '+esc(a['verified'])+'. Prior dates fetched: '+esc(p['coverage']['history_days_fetched'])+'/14.</p>'
-        body+=table(['Match','Source start (UTC)','State','Score','Retrieved','Fresh','Evidence'],[[esc(m['name']),esc(m['starts_at']),esc((m['status'].get('type') or {}).get('description')),esc(' – '.join(str(x['score']) if x['score'] is not None else '?' for x in m['participants'])),esc(m['observed_at']),esc(m['retrieval_fresh']),'<a href="/fresh/match/'+m['id']+'">7/14-day input package</a>'] for m in p['matches']])
+        body+=table(['Match','Source start (UTC)','State','Score','Retrieved','Fresh','Evidence'],[[esc(m['name']),esc(m['starts_at']),esc((m['status'].get('type') or {}).get('description')),esc(score_display(m)),esc(m['observed_at']),esc(m['retrieval_fresh']),('<a href="/fresh/match/'+m['id']+'">7/14-day input package</a>' if m['starts_at'] else 'Start time unverified')] for m in p['matches']])
         if p['upstream_errors']: body+='<p>Source failures: '+esc(json.dumps(p['upstream_errors']))+'</p>'
         return page(sport.title()+' · Fresh source evidence',body)
     @app.get('/fresh/match/{event_id}',response_class=HTMLResponse)

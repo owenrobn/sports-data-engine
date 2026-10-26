@@ -26,7 +26,7 @@ Exporting creates a second copy; it does not free database disk. The tool contai
 
 ## Current limits
 
-This is tested export/restore preparation, not a connected archive service. No Cloudflare account, bucket or credential has been created. The database remains stuck in PAUSING, so no live export, source count comparison or migration has been verified. Automatic retention, archive indexing, replay loading, source deletion and database storage-pressure monitoring are not enabled. Keep collection paused until these are verified. Private archive files must be served through authenticated backend reads, not public bucket URLs.
+Historical database export and migration remain unverified. The private archive connection is configured, and the separate fresh-evidence lane verifies its own uploads and manifests; inspect /fresh for runtime status. PostgreSQL startup is blocked by exhausted disk space even when management metadata reports ACTIVE_HEALTHY. Automatic database retention, historical replay loading, source deletion and database compaction remain disabled. Keep database-backed collection paused until recovery and write capacity are verified. Private archive files must be served through authenticated backend reads, not public bucket URLs.
 
 References: https://developers.cloudflare.com/r2/pricing/ and https://developers.cloudflare.com/r2/api/s3/api/ .
 

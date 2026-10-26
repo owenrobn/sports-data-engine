@@ -14,6 +14,7 @@ from laboratory import competitions,uid,norm,page,table,esc
 LEAGUES={'football':['eng.1','esp.1','ger.1','ita.1','ned.1','fra.1','uefa.champions'],'tennis':['atp','wta']}
 STATE={s:{'packs':{},'last_poll_at':None,'errors':[],'archive':{'verified':False,'status':'pending'},'history_cursor':1} for s in LEAGUES}
 ARCHIVE_LOCK=asyncio.Lock()
+ARCHIVE_USAGE={'bytes':None,'checked_at':None}
 CADENCE=120
 MAX_ROWS=5000
 MAX_OBJECT=8*1024*1024
@@ -56,10 +57,23 @@ def archive_write(snapshot,store):
     if store.read(key+'.manifest.json')!=receipt: raise ValueError('Archive manifest verification failed')
     return {'verified':True,'status':'verified','archived_at':observed,'matches':manifest['match_count'],'sha256':checksum,'historical_database_export':False}
 
+class BudgetedStore:
+    """Avoid a bucket-wide listing on every two-minute write; count own bytes conservatively."""
+    def __init__(self,store,usage): self.store=store;self.usage=usage;self.limit=store.limit
+    def size(self):
+        checked=self.usage['checked_at']
+        if self.usage['bytes'] is None or checked is None or (clock()-checked).total_seconds()>=3600:
+            self.usage.update(bytes=self.store.size(),checked_at=clock())
+        return self.usage['bytes']
+    def write_once(self,key,data):
+        self.store.write_once(key,data)
+        self.usage['bytes']=(self.usage['bytes'] or 0)+len(data)
+    def read(self,key): return self.store.read(key)
+
 def persist(snapshot):
     from archive_store import S3Store
     store=S3Store()
-    try: return archive_write(snapshot,store)
+    try: return archive_write(snapshot,BudgetedStore(store,ARCHIVE_USAGE))
     finally: store.client.close()
 
 def hydrate(sport):

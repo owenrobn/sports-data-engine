@@ -91,3 +91,12 @@ class RestartProgress(unittest.TestCase):
    f.restore_state('tennis',snapshot)
    self.assertEqual(f.STATE['tennis']['history_cursor'],8);self.assertEqual(f.STATE['tennis']['last_poll_at'],observed);self.assertFalse(f.output('tennis')['matches'][0]['retrieval_fresh'])
   finally: f.STATE['tennis']=old
+
+class ArchiveRequestBudget(unittest.TestCase):
+ def test_bucket_scan_is_cached_and_own_writes_count_towards_budget(self):
+  store=Store();usage={'bytes':None,'checked_at':None};wrapper=f.BudgetedStore(store,usage)
+  with patch.object(store,'size',wraps=store.size) as scans:
+   self.assertEqual(wrapper.size(),0);wrapper.write_once('data',b'123')
+   self.assertEqual(wrapper.size(),3);self.assertEqual(wrapper.size(),3);self.assertEqual(scans.call_count,1)
+   with patch('fresh_feed.clock',return_value=usage['checked_at']+timedelta(hours=2)): self.assertEqual(wrapper.size(),3)
+   self.assertEqual(scans.call_count,2)

@@ -34,3 +34,13 @@ class CloudDelivery(unittest.TestCase):
   out=envelope(self.eid,(clock()-timedelta(hours=1)).isoformat())
   self.assertIsNone(out['live_state']['snapshot']);self.assertFalse(out['live_state']['retrieval_fresh'])
   self.assertNotIn('participants',out['recent_performance']['match'])
+
+class ArchiveReplay(unittest.IsolatedAsyncioTestCase):
+ async def test_historical_archive_is_loaded_without_mutating_live_state(self):
+  from fresh_engine import replay
+  old=copy.deepcopy(f.STATE);now=clock();observed=(now-timedelta(minutes=12)).isoformat();decision=(now-timedelta(minutes=10)).isoformat();eid='00000000-0000-0000-0000-000000000003'
+  match={'id':eid,'sport':'tennis','name':'Alpha vs Beta','league':'atp','starts_at':(now+timedelta(hours=1)).isoformat(),'observed_at':observed,'status':{},'participants':[{'source_id':'1','name':'Alpha'},{'source_id':'2','name':'Beta'}]}
+  def snapshot(sport,cutoff):
+   return {'schema_version':1,'sport':sport,'archived_at':observed,'last_poll_at':observed,'packs':{'p':{'requested_date':now.date().isoformat(),'matches':[match] if sport=='tennis' else []}}}
+  with patch('fresh_feed.hydrate',side_effect=snapshot): out=await replay(eid,decision)
+  self.assertEqual(out['historical_replay']['mode'],'verified_immutable_cloud_snapshot');self.assertEqual(out['live_state']['snapshot']['observed_at'],observed);self.assertEqual(f.STATE,old)

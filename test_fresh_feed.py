@@ -145,3 +145,16 @@ class DecisionTimeIsolation(unittest.TestCase):
   data={'matches':[m],'profiles':{'atp:1':{'observed_at':now,'records':[]}},'coverage':{},'archive':{},'collection_mode':'archive'}
   with patch('fresh_feed.output',return_value=data): result=f.match_package('a')
   self.assertIsNone(result['detail_receipt']);self.assertNotIn('detail_receipt',result['match']);self.assertIsNone(result['participants'][0]['profiles'])
+
+class HistoricalSnapshotSelection(unittest.TestCase):
+ def test_replay_selects_only_verified_snapshot_archived_before_cutoff(self):
+  store=Store();now=clock();earlier=(now-timedelta(minutes=10)).isoformat();later=(now-timedelta(minutes=1)).isoformat()
+  for observed in (earlier,later): f.archive_write({'schema_version':1,'sport':'tennis','archived_at':observed,'packs':{}},store)
+  class Paginator:
+   def paginate(self,**kw): return [{'Contents':[{'Key':k} for k in store.data if k.startswith(kw['Prefix'])]}]
+  class Client:
+   def get_paginator(self,_): return Paginator()
+   def close(self): pass
+  store.client=Client();store.bucket='private'
+  with patch('archive_store.S3Store',return_value=store): snap=f.hydrate('tennis',now-timedelta(minutes=5))
+  self.assertEqual(snap['archived_at'],earlier)

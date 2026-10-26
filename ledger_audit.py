@@ -106,8 +106,8 @@ async def collect(sport):
 
 async def report(event_id,as_of=None,private=False):
     if collection_paused():
-        from fresh_engine import ledger
-        return ledger(event_id,as_of,private)
+        from fresh_engine import ledger,replay
+        return await replay(event_id,as_of,'ledger',private) if as_of else ledger(event_id,None,private)
     cutoff=date(as_of) if as_of else clock()
     if not cutoff or cutoff>clock(): raise HTTPException(422,'Use a timezone-aware as_of no later than now')
     events=await get('events',id='eq.'+str(event_id),limit=1)

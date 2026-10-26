@@ -74,8 +74,8 @@ async def get(table,**q): return await CTX['db']('GET',table,query='?'+urlencode
 async def envelope(event_id,as_of=None):
     from runtime_policy import collection_paused
     if collection_paused():
-        from fresh_engine import envelope as archived
-        return archived(event_id,as_of)
+        from fresh_engine import envelope as archived,replay
+        return await replay(event_id,as_of) if as_of else archived(event_id)
     from context_feed import package as context_package
     from live_state import package as live_package
     decision=date(as_of) if as_of else clock()

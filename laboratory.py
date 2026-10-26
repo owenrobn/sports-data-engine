@@ -459,8 +459,8 @@ def install(ctx):
     async def dashboard():
         from runtime_policy import collection_paused
         if collection_paused():
-            from archive_health import status_html
-            return page('Sports Data Engine — collection paused','<section role="alert"><h2>Database recovery required</h2><p>Collection is paused after a database full-disk incident. Retained history has not been deleted. The full database-backed engine remains unavailable. Independent fresh collection for both sports is available below.</p><p><a href="/fresh?sport=football">Fresh football evidence</a> · <a href="/fresh?sport=tennis">Fresh tennis evidence</a></p></section>'+status_html())
+            from fresh_feed import dashboard as cloud_dashboard
+            return cloud_dashboard()
         try: baseline=await original()
         except Exception:
             return page('Sports Data Engine — database unavailable','<section role="alert"><h2>Database recovery required</h2><p>The last verified database incident was a full disk. Live coverage cannot currently be verified. No zero counts or stale observations are presented as current results.</p><p>Collection is paused to protect retained history. Database capacity and write health must be restored before collection resumes.</p></section>')

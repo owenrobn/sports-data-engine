@@ -1,3 +1,4 @@
+from runtime_policy import collection_paused
 """Receipt-first LEDGER audit. No orders, fills or bankroll values are fabricated."""
 import asyncio
 import hmac
@@ -197,7 +198,7 @@ def install(ctx):
         return page(p['match']+' · LEDGER audit',body)
     @app.on_event('startup')
     async def start():
-        if not ctx['SUPABASE_KEY']: return
+        if collection_paused() or not ctx['SUPABASE_KEY']: return
         from laboratory import BACKGROUND,tracked
         async def lane(sport):
             while True:

@@ -84,3 +84,12 @@ Automatic recent price-history work is limited to six linked markets per sport/p
 This reduces resource use; it does **not** shrink the retained 1.5 GB history below the free database allowance, grant licensed source access, or guarantee continuous uptime on sleeping free hosting. A free archival design must preserve and verify recoverability before any historical records can be moved out of the query database. No historical deletion or paid upgrade is part of free mode.
 
 
+
+## Independent fresh evidence during database recovery
+`/fresh?sport=football` and `/fresh?sport=tennis` provide current source evidence without reading or writing the failed database. `/data/fresh`, `/fresh/match/{event_id}` and `/data/fresh/match/{event_id}` expose the corresponding source receipts and strictly bounded 7/14-day observations. This is partial evidence collection, not a declaration that IMG-RAE, historical replay or LEDGER are complete.
+
+While `SDE_COLLECTION_PAUSED=1`, legacy database collectors and their shutdown writes stay paused. Independent lanes poll the selected ESPN leagues every 120 seconds while the service is awake. Each pass refreshes today/tomorrow and one prior date; 14-day history builds gradually and is not treated as a verified complete schedule. Unknown profiles, availability, minutes, server state or market benchmarks are not fabricated. Source failures and retrieval age are visible.
+
+The existing private archive connection is reused under `sde/fresh/v1/` without creating credentials, changing bucket visibility or upgrading plans. Gzip JSON snapshots preserve normalized source facts, receipts and explicit unknowns. Uploads require object read-back equality, SHA-256 checks and a verified immutable manifest. The bucket byte budget is checked before writes; snapshots have row and decompression limits. Startup can restore verified manifests from the last three days; orphan objects are ignored. Retrieval timestamps are not refreshed by loading an old snapshot. A failed private write is labelled as unverified/memory-only collection. No historical database rows are removed or declared migrated.
+
+`/health` now separates process liveness, credential configuration, the paused database and independent fresh-feed/archive state. It never equates a configured database key with verified database availability. Database-dependent HTTP failures return a controlled 503 rather than pretending zero coverage.

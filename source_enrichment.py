@@ -1,3 +1,4 @@
+from runtime_policy import collection_paused
 """Bounded public-source enrichment. Source payloads remain evidence, not inferred facts."""
 import asyncio
 from datetime import timedelta
@@ -63,7 +64,7 @@ def install(ctx):
     CTX.update(ctx)
     @ctx['app'].on_event('startup')
     async def start():
-        if not ctx['SUPABASE_KEY']: return
+        if collection_paused() or not ctx['SUPABASE_KEY']: return
         from laboratory import BACKGROUND,tracked
         async def lane(sport):
             while True:

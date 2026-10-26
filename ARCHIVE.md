@@ -30,3 +30,8 @@ This is tested export/restore preparation, not a connected archive service. No C
 
 References: https://developers.cloudflare.com/r2/pricing/ and https://developers.cloudflare.com/r2/api/s3/api/ .
 
+
+## Recovery update: independent fresh lane
+On 2026-10-26, PostgreSQL startup logs still reported inability to write a WAL temporary file because the disk was full, despite the management status reporting ACTIVE_HEALTHY. No destructive repair is attempted by the application. The private bucket connection can be verified independently at `/archive/status`; that check does not verify historical export.
+
+A separate `fresh_feed.py` collector now writes bounded, read-back-verified gzip JSON source snapshots to `sde/fresh/v1/` during database recovery. Its live verification status appears on `/fresh` and `/health`. This new prefix does not replace the existing Parquet archive format or its checks. Historical database export, removal, compaction and replay migration remain unverified and disabled. Database collection stays paused until recovery and write capacity are verified.

@@ -1,3 +1,4 @@
+from runtime_policy import collection_paused
 """Rolling, as-of evidence for IMG-RAE / LEDGER. No inferred medical facts."""
 import asyncio
 import hashlib
@@ -343,7 +344,7 @@ def install(ctx):
         return page(p['match']+' · Recent evidence',body)
     @app.on_event('startup')
     async def start():
-        if not ctx['SUPABASE_KEY']: return
+        if collection_paused() or not ctx['SUPABASE_KEY']: return
         from laboratory import tracked,BACKGROUND
         async def lane(sport):
             while True:

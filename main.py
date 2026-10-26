@@ -1,7 +1,7 @@
 import asyncio, json, os, uuid
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Header
-from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse, JSONResponse
 import httpx
 
 app=FastAPI(title="Sports Data Engine",version="0.5.0")
@@ -19,7 +19,7 @@ async def db(method,table,payload=None,query="",prefer=None):
     if not (SUPABASE_URL and SUPABASE_KEY): return None
     from runtime_policy import collection_paused
     if method not in ('GET','HEAD') and collection_paused():
-        raise RuntimeError('Collection paused for database disk recovery')
+        raise HTTPException(503,detail={'status':'database_recovery','fresh_evidence':'/fresh','message':'Historical database collection remains paused during disk recovery'})
     identities={"football_match_events":"provider,event_id,provider_event_id","tennis_match_events":"provider,event_id,provider_event_id","prediction_market_snapshots":"ingest_key","prediction_market_trades":"ingest_key","prediction_market_books":"ingest_key","event_market_timeline":"ingest_key","backfill_checkpoints":"provider,stream,cursor_key"}
     if method=="POST" and table in identities and "on_conflict=" not in query:
         query+=("&" if query else "?")+"on_conflict="+identities[table]
@@ -43,7 +43,8 @@ def emit(kind,message,**data):
 @app.on_event("startup")
 async def startup():
     emit("system","SDE v0.5 online",persistent=bool(SUPABASE_KEY))
-    if SUPABASE_KEY:
+    from runtime_policy import collection_paused
+    if SUPABASE_KEY and not collection_paused():
         from laboratory import run_engine
         app.state.engine=asyncio.create_task(run_engine(globals()))
 
@@ -408,7 +409,14 @@ async def bootstrap_collectors():
 @app.get("/")
 async def root(): return RedirectResponse("/dashboard")
 @app.get("/health")
-async def health(): return {"ok":True,"service":"sports-data-engine","version":"0.5.0","database":bool(SUPABASE_KEY),"time":now()}
+async def health():
+    from runtime_policy import collection_paused
+    from fresh_feed import output
+    return {'ok':True,'service':'sports-data-engine','database_configured':bool(SUPABASE_KEY),'database_verified':False if collection_paused() else None,'database_collection_paused':collection_paused(),'fresh_feeds':{s:{'matches_observed':output(s)['matches_observed'],'last_poll_at':output(s)['last_poll_at'],'archive':output(s)['archive']} for s in ('football','tennis')},'time':now()}
+
+@app.exception_handler(httpx.HTTPError)
+async def upstream_unavailable(request,exc):
+    return JSONResponse(status_code=503,content={'status':'upstream_unavailable','detail':'This route depends on an unavailable service. Independent source evidence is available at /fresh.','fresh_evidence':'/fresh'})
 @app.get("/providers")
 async def providers(): return {"providers":{"sofascore":"blocked-on-render","polymarket":"active","statsbomb":"backfill","football-data":"backfill","thesportsdb":"active-fallback"},"sports":["football","tennis"]}
 @app.get("/status")
@@ -569,6 +577,9 @@ install_delivery(globals())
 
 from ledger_audit import install as install_ledger
 install_ledger(globals())
+
+from fresh_feed import install as install_fresh
+install_fresh(app)
 
 @app.on_event('shutdown')
 async def close_shared_clients():

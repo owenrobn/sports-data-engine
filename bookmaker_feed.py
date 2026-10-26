@@ -1,3 +1,4 @@
+from runtime_policy import collection_paused
 """Optional quota-bounded bookmaker feed with exact fixture matching."""
 import asyncio
 import os
@@ -65,7 +66,7 @@ def install(ctx):
     CTX.update(ctx)
     @ctx['app'].on_event('startup')
     async def start():
-        if not ctx['SUPABASE_KEY'] or not os.getenv('ODDS_API_KEY') or not os.getenv('ODDS_API_SPORT_KEYS'): return
+        if collection_paused() or not ctx['SUPABASE_KEY'] or not os.getenv('ODDS_API_KEY') or not os.getenv('ODDS_API_SPORT_KEYS'): return
         from laboratory import tracked,BACKGROUND
         async def lane(sport):
             while True:

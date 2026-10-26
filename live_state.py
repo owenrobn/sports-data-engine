@@ -1,3 +1,4 @@
+from runtime_policy import collection_paused
 """Timestamped current-match evidence, separate from pre-match lookback windows."""
 import asyncio
 import json
@@ -81,7 +82,7 @@ def install(ctx):
         return page(p['match']+' · Current match evidence','<p><a href="/context">Matches</a> · <a href="/data/live/'+str(event_id)+'">Live JSON</a></p><p>Snapshots refresh approximately every minute while the service is awake. Missing fields remain unknown. Provider latency is not verified.</p><pre>'+esc(json.dumps(p,indent=2))+'</pre>')
     @app.on_event('startup')
     async def startup():
-        if not ctx['SUPABASE_KEY']: return
+        if collection_paused() or not ctx['SUPABASE_KEY']: return
         from laboratory import tracked,BACKGROUND
         async def lane(sport):
             while True:

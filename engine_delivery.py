@@ -106,6 +106,11 @@ async def envelope(event_id,as_of=None):
 async def operations():
     from runtime_policy import policy
     runtime=policy()
+    from runtime_policy import collection_paused
+    if collection_paused():
+        from fresh_feed import output
+        from context_feed import provider_status
+        return {'runtime_policy':runtime,'generated_at':clock().isoformat(),'providers':[],'access':provider_status(),'fresh_collection':{s:{'matches_observed':output(s)['matches_observed'],'last_poll_at':output(s)['last_poll_at'],'archive':output(s)['archive']} for s in ('football','tennis')},'blockers':['Historical database cannot start after disk exhaustion. Database-backed collection remains paused.','The independent fresh feed does not supply every PRD input or prove complete source coverage.'],'service_continuity':'Independent source polling and verified private archival run while this free service is awake. Open /fresh for collected evidence.'}
     runs=await get('sde_provider_runs',order='started_at.desc',limit=250)
     latest={}
     for r in runs: latest.setdefault((r['sport'],r['provider']),r)
@@ -140,5 +145,6 @@ def install(ctx):
         p=await operations();body='<p><a href="/context">Match packages</a> · <a href="/rae">Full requirements</a> · <a href="/data/operations">Health JSON</a></p><p>'+esc(p['service_continuity'])+'</p>'
         body+='<p>Free mode: '+esc(p['runtime_policy']['free_mode'])+'. Automatic archive expansion: '+esc(p['runtime_policy']['archive_backfill_enabled'])+'. Deep trade backfill: '+esc(p['runtime_policy']['deep_trade_backfill_enabled'])+'. Recent historical prices: '+esc(p['runtime_policy']['recent_history_fidelity_minutes'])+' minute samples.</p>'
         body+=table(['Sport','Collector','Last status','Records','Age (seconds)','Stale','Stalled','Error'],[[esc(r[k]) for k in ('sport','provider','status','records','age_seconds','stale','stalled','last_error')] for r in p['providers']])
+        body+='<p><a href="/fresh?sport=football">Fresh football evidence</a> · <a href="/fresh?sport=tennis">Fresh tennis evidence</a></p>'
         body+='<h2>Access and infrastructure blockers</h2><ul>'+''.join('<li>'+esc(x)+'</li>' for x in p['blockers'])+'</ul>'
         return page('SDE · Operations and remaining access',body)

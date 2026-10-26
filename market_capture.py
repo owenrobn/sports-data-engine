@@ -1,3 +1,4 @@
+from runtime_policy import collection_paused
 """Read-only executable book collection; never submits orders."""
 import asyncio
 from datetime import timedelta
@@ -32,7 +33,7 @@ def install(ctx):
     CTX.update(ctx)
     @ctx['app'].on_event('startup')
     async def start():
-        if not ctx['SUPABASE_KEY']: return
+        if collection_paused() or not ctx['SUPABASE_KEY']: return
         from laboratory import tracked,BACKGROUND
         async def lane(sport):
             while True:
